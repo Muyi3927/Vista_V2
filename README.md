@@ -61,7 +61,7 @@ graph LR
 ### 1. 创建 Conda 虚拟环境
 
 ```bash
-git clone https://github.com/Muyi3927/VISTA.git
+git clone https://github.com/Muyi3927/Vista_V2.git
 cd VISTA
 
 conda create -n vista python=3.10 -y
@@ -253,14 +253,7 @@ VISTA/
 
 ---
 
-## 引用 (Citation)
+## 开源许可 (License)
 
-如果您在学术研究或工程项目中使用了 VISTA，请引用本项目：
+本项目基于 [MIT License](LICENSE) 开源协议发布。您可以自由地在学术研究、个人学习以及商业项目中分发、修改与使用本项目的源代码与衍生作品。
 
-```bibtex
-@article{vista2025,
-  title={VISTA: Vectorization using Image Segmentation and Tuned Optimization Algorithm},
-  author={He, J.H. and Collaborators},
-  year={2025}
-}
-```
