@@ -1,0 +1,33 @@
+# =============================================================================
+# VISTA: Python 依赖清单 (Requirements)
+# 注意：PyTorch 与 DiffVG 建议按 README.md 中的步骤通过 Conda 及源码编译安装。
+# =============================================================================
+
+# 1. 核心科学计算与图像处理
+numpy>=1.24.0,<2.0.0
+opencv-python>=4.8.0
+scikit-learn>=1.3.0
+scikit-image>=0.21.0
+scipy>=1.10.0
+pillow>=10.0.0
+imageio>=2.31.0
+imageio-ffmpeg>=0.4.9
+numba>=0.58.0
+tqdm>=4.65.0
+pyyaml>=6.0
+
+# 2. 图像分割大模型 (SAM)
+segment-anything>=1.0
+
+# 3. 矢量图形与 SVG 解析
+svgwrite>=1.4.3
+svgpathtools>=1.6.1
+cssutils>=2.9.0
+cairosvg>=2.7.0
+
+# 4. Web 交互工作台 (FastAPI & Gradio)
+fastapi>=0.100.0
+uvicorn>=0.22.0
+python-multipart>=0.0.6
+gradio>=4.0.0
+requests>=2.31.0

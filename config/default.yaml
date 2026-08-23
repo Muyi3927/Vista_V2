@@ -1,0 +1,143 @@
+# =============================================================================
+# VISTA: 图像矢量化主配置文件
+# 运行方式：
+#   cd src && python vista_main.py
+# =============================================================================
+
+project:
+  # 项目根目录（留空则自动根据代码位置探测项目根目录）
+  root: ""
+  # Web 交互临时文件输出目录
+  temp_outputs: temp_outputs
+
+# 运行模式：
+#   auto   - 自动判定：paths.input 为单张图片文件则单图运行；为目录则批量运行
+#   image  - 强制按单图模式运行
+#   folder - 强制按文件夹批量模式运行
+run:
+  mode: auto
+
+paths:
+  # 输入图像文件或包含图像的目录路径
+  input: /home/jh/research/projects/VISTA_dev/VISTA/dataset/emoji_2.png
+  # 矢量化结果（SVG/GIF/JSON）输出根目录
+  output: outputs
+  # SAM 语义分割模型权重路径
+  sam_checkpoint: /home/jh/research/projects/VISTA/sam_vit_h_4b8939.pth
+
+# 计算设备：auto (优先GPU) | cuda:0 | cpu
+device: auto
+
+# -----------------------------------------------------------------------------
+# 候选分割生成（SAM + SLIC）
+# -----------------------------------------------------------------------------
+sam:
+  enabled: true
+  model_type: vit_h
+  pred_iou_thresh: 0.88
+  stability_score_thresh: 0.95
+  crop_n_layers: 1
+  points_per_side: 64
+  min_mask_region_area: 0
+
+slic:
+  enabled: true
+  n_segments: 2000
+  compactness: 5.0
+  dbscan_eps: 5.0
+
+# -----------------------------------------------------------------------------
+# 掩码预处理与分层融合（孔洞提取、连通域拆分、纯度感知直接父级同色吸收）
+# -----------------------------------------------------------------------------
+preprocess:
+  # 图像预处理尺寸（0 表示保持原始分辨率，>0 表示缩放到指定最长边）
+  target_size: 0
+  # 最小有效掩码面积比例（若 >= 1 则为绝对像素数）
+  min_area: 0.00015
+  # SAM 压制重叠 SLIC 候选的 IoU 阈值
+  iou_sam_slic_thresh: 0.9
+  # SAM 内部自去重的 IoU 阈值
+  iou_threshold: 0.9
+  # 判定直接父级包含关系的面积包含率阈值
+  inclusion_threshold: 0.90
+  # 自身颜色方差保护阈值（高于此方差判定为不纯/纹理大块，跳过被吸收）
+  self_pure_std_thresh: 15.0
+  # 直接父级颜色方差保护阈值（高于此方差判定父级包含多物体，停止吸收）
+  parent_pure_std_thresh: 3.0
+  # 父子图层同色吸收的最大颜色欧氏距离阈值
+  color_diff_thresh: 5.0
+
+# -----------------------------------------------------------------------------
+# 贝塞尔曲线几何拟合
+# -----------------------------------------------------------------------------
+path_fit:
+  # 贝塞尔拟合误差容差（< 0.1 则为相对长边比例，默认 0.003 对应 512 分辨率下的 1.5px）
+  bezier_max_error: 0.003
+  # 直线判断阈值（< 0.1 则为相对长边比例，默认 0.004 对应 512 分辨率下的 2.0px）
+  line_threshold: 0.004
+  # approxPolyDP 简化精度（null 则自适应跟随 bezier_max_error）
+  poly_epsilon: null
+  # 轮廓点最小间距（< 0.1 则为相对长边比例，默认 0.004 对应 512 分辨率下的 2.0px）
+  contour_min_dist: 0.004
+
+# -----------------------------------------------------------------------------
+# DiffVG 可微渲染优化超参数
+# -----------------------------------------------------------------------------
+optimize:
+  # 控制点坐标学习率
+  learning_rate: 0.1
+  # 填充颜色学习率
+  color_lr: 0.01
+  # 描边宽度学习率
+  stroke_width_lr: 0.05
+  # 描边颜色学习率
+  stroke_color_lr: 0.01
+  # 最大优化迭代步数
+  num_iters: 1000
+  # 是否开启描边优化
+  is_stroke: false
+  # 早停容忍步数
+  early_stopping_patience: 20
+  # 早停最小改善阈值
+  early_stopping_delta: 5.0e-5
+  # 共线平滑正则化损失权重
+  collinear_scale: 0.01
+  # 共线夹角余弦判定阈值
+  collinear_cos_threshold: 0.5
+  # 中间 SVG 保存间隔步数
+  save_every: 5
+  # 动画帧采样间隔步数
+  frame_every: 5
+
+# -----------------------------------------------------------------------------
+# 优化后几何光栅化剪枝与短迭代精修
+# -----------------------------------------------------------------------------
+prune:
+  enabled: true
+  # 剪枝颜色差异阈值
+  rm_color_threshold: 0.02
+  # 剪枝几何包含率阈值
+  inclusion_threshold: 0.8
+  # 剪枝后二次微调迭代步数
+  refine_iters: 100
+  # 几何光栅化二值化阈值
+  raster_threshold: 0.5
+
+# -----------------------------------------------------------------------------
+# 中间过程输出与可视化结果保存开关（默认全部开启）
+# -----------------------------------------------------------------------------
+save_options:
+  # 是否保存阶段1原始分割掩码 (raw_sam_masks / raw_slic_masks)
+  save_raw_masks: true
+  # 是否保存阶段2形态学拆解后的原版掩码 (origin_masks)
+  save_origin_masks: true
+  # 是否保存阶段3 IoU去重后的中间掩码 (nms_masks)
+  save_nms_masks: true
+  # 是否保存阶段3最终精炼掩码 (pre_masks)
+  save_pre_masks: true
+  # 是否同步保存单图层真彩掩码 png
+  save_color_mask: true
+  # 是否生成各阶段全景彩色叠加图 (overview_colored.png)
+  save_overview_images: true
+  # 是否在 init_svgs 中保存单图层及累积的每一步 SVG 文件
+  save_step_svgs: true

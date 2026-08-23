@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VISTA Studio — 语义分割与可微渲染图像矢量化交互工作台</title>
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+
+<body>
+    <!-- Top Navigation Header -->
+    <header class="app-header">
+        <div class="header-left">
+            <img src="/static/logo.svg" alt="VISTA Logo" class="app-logo">
+            <div class="header-titles">
+                <h1>VISTA Studio</h1>
+                <span class="header-badge">v2.0 Differentiable Vectorizer</span>
+            </div>
+        </div>
+
+        <div class="header-center">
+            <span class="preset-label">快速预设：</span>
+            <div class="preset-group">
+                <button type="button" class="preset-btn" data-preset="fast">⚡ 快速预览</button>
+                <button type="button" class="preset-btn active" data-preset="balanced">🎯 标准平衡</button>
+                <button type="button" class="preset-btn" data-preset="high_quality">🔬 高保真精细</button>
+            </div>
+        </div>
+
+        <div class="header-right">
+            <button id="theme-toggle" class="icon-btn" title="切换暗色/明亮主题">
+                <i data-lucide="moon" class="icon-moon"></i>
+                <i data-lucide="sun" class="icon-sun"></i>
+            </button>
+        </div>
+    </header>
+
+    <!-- Main Studio Workspace Grid -->
+    <main class="app-main">
+        <!-- Left Panel: Upload & Parameter Settings -->
+        <aside class="sidebar">
+            <!-- 1. Image Upload Card -->
+            <div class="card upload-card">
+                <div class="card-header">
+                    <div class="card-title">
+                        <i data-lucide="upload-cloud"></i>
+                        <span>输入目标图像</span>
+                    </div>
+                </div>
+                
+                <div id="dropzone" class="dropzone">
+                    <input type="file" id="file-input" accept="image/*" class="file-input">
+                    <div class="dropzone-content">
+                        <i data-lucide="image" class="dropzone-icon"></i>
+                        <p class="dropzone-text">点击或拖拽图像至此处</p>
+                        <span class="dropzone-hint">支持 PNG, JPG, WEBP, BMP (透明背景自动合成)</span>
+                    </div>
+                </div>
+
+                <div id="preview-box" class="preview-box hidden">
+                    <img id="image-preview" src="" alt="Target Image Preview">
+                    <div class="preview-info">
+                        <span id="file-name" class="file-name">image.png</span>
+                        <span id="file-meta" class="file-meta">512×512</span>
+                    </div>
+                    <button id="remove-file-btn" class="icon-btn-sm" title="移除图像">
+                        <i data-lucide="trash-2"></i>
+                    </button>
+                </div>
+            </div>
+
+            <!-- 2. Parameters Control Card -->
+            <div class="card params-card">
+                <div class="card-header">
+                    <div class="card-title">
+                        <i data-lucide="sliders"></i>
+                        <span>全流程可调超参数</span>
+                    </div>
+                    <div class="header-actions">
+                        <button id="reset-params-btn" class="text-btn" title="重置为 YAML 默认参数">恢复默认</button>
+                    </div>
+                </div>
+
+                <!-- Step Navigation Pills -->
+                <div class="param-nav-tabs">
+                    <button type="button" class="param-nav-btn active" data-step="1">1. 预处理</button>
+                    <button type="button" class="param-nav-btn" data-step="2">2. SLIC</button>
+                    <button type="button" class="param-nav-btn" data-step="3">3. SAM</button>
+                    <button type="button" class="param-nav-btn" data-step="4">4. 融合</button>
+                    <button type="button" class="param-nav-btn" data-step="5">5. DiffVG</button>
+                    <button type="button" class="param-nav-btn" data-step="all">全部</button>
+                </div>
+
+                <!-- Parameters Content Container -->
+                <div class="params-body">
+                    <!-- Stage 1: Preprocess -->
+                    <div class="param-section" data-section="1">
+                        <div class="section-badge">阶段 1 · 图像基础与预处理</div>
+                        <div class="control-row">
+                            <div class="control-label-row">
+                                <label for="target_size">目标导出长边尺寸 (target_size)</label>
+                                <span id="target_size_val" class="control-val">原图 (0)</span>
+                            </div>
+                            <input type="range" id="target_size" min="0" max="1536" step="128" value="0">
+                            <span class="control-hint">0 表示保持原图分辨率，非 0 则等比例缩放长边</span>
+                        </div>
+                    </div>
+
+                    <!-- Stage 2: SLIC Superpixels -->
+                    <div class="param-section hidden" data-section="2">
+                        <div class="section-badge">阶段 2 · SLIC 超像素聚类</div>
+                        <div class="control-row">
+                            <div class="control-label-row">
+                                <label for="slic_n_segments">超像素初始数目 (n_segments)</label>
+                                <span id="slic_n_segments_val" class="control-val">2000</span>
+                            </div>
+                            <input type="range" id="slic_n_segments" min="500" max="5000" step="100" value="2000">
+                            <span class="control-hint">越大超像素块越细碎，细节还原度越高</span>
+                        </div>
+                        <div class="control-row">
+                            <div class="control-label-row">
+                                <label for="slic_compactness">紧凑度 (compactness)</label>
+                                <span id="slic_compactness_val" class="control-val">5.0</span>
+                            </div>
+                            <input type="range" id="slic_compactness" min="1.0" max="20.0" step="0.5" value="5.0">
+                        </div>
+                        <div class="control-row">
+                            <div class="control-label-row">
+                                <label for="dbscan_eps">DBSCAN 色彩聚类距离 (dbscan_eps)</label>
+                                <span id="dbscan_eps_val" class="control-val">5.0</span>
+                            </div>
+                            <input type="range" id="dbscan_eps" min="1.0" max="20.0" step="0.5" value="5.0">
+                            <span class="control-hint">控制相近色块合并聚类的距离阈值</span>
+                        </div>
+                    </div>
+
+                    <!-- Stage 3: SAM Segmentation -->
+                    <div class="param-section hidden" data-section="3">
+                        <div class="section-badge">阶段 3 · SAM 语义分割先验</div>
+                        <div class="control-row toggle-row">
+                            <label for="use_sam">启用 SAM 语义先验大模型</label>
+                            <label class="switch">
+                                <input type="checkbox" id="use_sam" checked>
+                                <span class="slider"></span>
+                            </label>
+                        </div>
+                        <div class="control-row">
+                            <div class="control-label-row">
+                                <label for="pred_iou_thresh">预测 IoU 阈值 (pred_iou_thresh)</label>
+                                <span id="pred_iou_thresh_val" class="control-val">0.88</span>
+                            </div>
+                            <input type="range" id="pred_iou_thresh" min="0.50" max="0.99" step="0.01" value="0.88">
+                        </div>
+                        <div class="control-row">
+                            <div class="control-label-row">
+                                <label for="stability_score_thresh">稳定性得分阈值 (stability)</label>
+                                <span id="stability_score_thresh_val" class="control-val">0.95</span>
+                            </div>
+                            <input type="range" id="stability_score_thresh" min="0.50" max="0.99" step="0.01" value="0.95">
+                        </div>
+                        <div class="control-row">
+                            <div class="control-label-row">
+                                <label for="points_per_side">网格点采样密度 (points_per_side)</label>
+                                <span id="points_per_side_val" class="control-val">64</span>
+                            </div>
+                            <input type="range" id="points_per_side" min="8" max="64" step="4" value="64">
+                            <span class="control-hint">控制 SAM 提示点网格密度（32 或 64）</span>
+                        </div>
+                    </div>
+
+                    <!-- Stage 4: Fusion & Purity -->
+                    <div class="param-section hidden" data-section="4">
+                        <div class="section-badge">阶段 4 · 层级融合与纯度吸收</div>
+                        <div class="control-row">
+                            <div class="control-label-row">
+                                <label for="min_area">最小有效面积比例 (min_area)</label>
+                                <span id="min_area_val" class="control-val">0.00015</span>
+                            </div>
+                            <input type="range" id="min_area" min="0.00005" max="0.002" step="0.00005" value="0.00015">
+                        </div>
+                        <div class="control-row">
+                            <div class="control-label-row">
+                                <label for="iou_sam_slic_thresh">SAM 压制 SLIC 阈值 (IoU)</label>
+                                <span id="iou_sam_slic_thresh_val" class="control-val">0.90</span>
+                            </div>
+                            <input type="range" id="iou_sam_slic_thresh" min="0.70" max="0.99" step="0.01" value="0.90">
+                        </div>
+                        <div class="control-row">
+                            <div class="control-label-row">
+                                <label for="iou_sam_internal_thresh">SAM 内部去重阈值 (IoU)</label>
+                                <span id="iou_sam_internal_thresh_val" class="control-val">0.90</span>
+                            </div>
+                            <input type="range" id="iou_sam_internal_thresh" min="0.70" max="0.99" step="0.01" value="0.90">
+                        </div>
+                        <div class="control-row">
+                            <div class="control-label-row">
+                                <label for="parent_contain_thresh">父级包含率阈值 (Containment)</label>
+                                <span id="parent_contain_thresh_val" class="control-val">0.90</span>
+                            </div>
+                            <input type="range" id="parent_contain_thresh" min="0.70" max="0.99" step="0.01" value="0.90">
+                        </div>
+                        <div class="control-row">
+                            <div class="control-label-row">
+                                <label for="self_pure_std_thresh">自身纯度上限方差 (self_std)</label>
+                                <span id="self_pure_std_thresh_val" class="control-val">15.0</span>
+                            </div>
+                            <input type="range" id="self_pure_std_thresh" min="5.0" max="40.0" step="1.0" value="15.0">
+                        </div>
+                        <div class="control-row">
+                            <div class="control-label-row">
+                                <label for="parent_pure_std_thresh">父级纯度上限方差 (parent_std)</label>
+                                <span id="parent_pure_std_thresh_val" class="control-val">3.0</span>
+                            </div>
+                            <input type="range" id="parent_pure_std_thresh" min="1.0" max="15.0" step="0.5" value="3.0">
+                        </div>
+                        <div class="control-row">
+                            <div class="control-label-row">
+                                <label for="color_diff_thresh">父子同色吸收色差 (color_diff)</label>
+                                <span id="color_diff_thresh_val" class="control-val">5.0</span>
+                            </div>
+                            <input type="range" id="color_diff_thresh" min="1.0" max="25.0" step="0.5" value="5.0">
+                        </div>
+                    </div>
+
+                    <!-- Stage 5: Vectorize & DiffVG -->
+                    <div class="param-section hidden" data-section="5">
+                        <div class="section-badge">阶段 5 · 几何拟合与 DiffVG 可微优化</div>
+                        <div class="control-row">
+                            <div class="control-label-row">
+                                <label for="bzer_max_error">贝塞尔拟合误差容差 (max_error)</label>
+                                <span id="bzer_max_error_val" class="control-val">0.0030</span>
+                            </div>
+                            <input type="range" id="bzer_max_error" min="0.0005" max="0.0100" step="0.0005" value="0.0030">
+                        </div>
+                        <div class="control-row">
+                            <div class="control-label-row">
+                                <label for="line_threshold">直线判断阈值 (line_thresh)</label>
+                                <span id="line_threshold_val" class="control-val">0.0040</span>
+                            </div>
+                            <input type="range" id="line_threshold" min="0.0005" max="0.0150" step="0.0005" value="0.0040">
+                        </div>
+                        <div class="control-row">
+                            <div class="control-label-row">
+                                <label for="learning_rate">控制点坐标学习率 (lr)</label>
+                                <span id="learning_rate_val" class="control-val">0.10</span>
+                            </div>
+                            <input type="range" id="learning_rate" min="0.01" max="0.30" step="0.01" value="0.10">
+                        </div>
+                        <div class="control-row">
+                            <div class="control-label-row">
+                                <label for="num_iters">优化迭代轮数 (num_iters)</label>
+                                <span id="num_iters_val" class="control-val">1000</span>
+                            </div>
+                            <input type="range" id="num_iters" min="100" max="2000" step="50" value="1000">
+                        </div>
+                        <div class="control-row">
+                            <div class="control-label-row">
+                                <label for="early_stopping_patience">早停耐心轮数 (patience)</label>
+                                <span id="early_stopping_patience_val" class="control-val">20</span>
+                            </div>
+                            <input type="range" id="early_stopping_patience" min="5" max="50" step="5" value="20">
+                        </div>
+                        <div class="control-row toggle-row">
+                            <label for="prune_enabled">启用优化后几何同色剪枝</label>
+                            <label class="switch">
+                                <input type="checkbox" id="prune_enabled" checked>
+                                <span class="slider"></span>
+                            </label>
+                        </div>
+                        <div class="control-row">
+                            <div class="control-label-row">
+                                <label for="rm_color_threshold">剪枝同色阈值 (rm_color_thresh)</label>
+                                <span id="rm_color_threshold_val" class="control-val">0.02</span>
+                            </div>
+                            <input type="range" id="rm_color_threshold" min="0.005" max="0.05" step="0.005" value="0.02">
+                        </div>
+                        <div class="control-row">
+                            <div class="control-label-row">
+                                <label for="refine_iters">剪枝后精修轮数 (refine_iters)</label>
+                                <span id="refine_iters_val" class="control-val">80</span>
+                            </div>
+                            <input type="range" id="refine_iters" min="0" max="200" step="10" value="80">
+                        </div>
+                        <div class="control-row toggle-row">
+                            <label for="is_stroke">包含描边优化 (is_stroke)</label>
+                            <label class="switch">
+                                <input type="checkbox" id="is_stroke">
+                                <span class="slider"></span>
+                            </label>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Submit Run Action Button -->
+                <button id="process-btn" class="primary-btn">
+                    <i data-lucide="play"></i>
+                    <span>开始矢量化 (Run VISTA)</span>
+                </button>
+            </div>
+        </aside>
+
+        <!-- Right Panel: Canvas Workspace -->
+        <section class="workspace">
+            <!-- View Mode Tabs -->
+            <div class="tabs-header">
+                <button type="button" class="tab-btn active" data-tab="tab-result">
+                    <i data-lucide="vector"></i> 最终矢量成果 (SVG)
+                </button>
+                <button type="button" class="tab-btn" data-tab="tab-animation">
+                    <i data-lucide="film"></i> 优化过程动画 (GIF)
+                </button>
+                <button type="button" class="tab-btn" data-tab="tab-stages">
+                    <i data-lucide="layout-grid"></i> 全阶段看板 (Overviews)
+                </button>
+                <button type="button" class="tab-btn" data-tab="tab-layers">
+                    <i data-lucide="layers"></i> 图层分解画廊 (Layers)
+                </button>
+            </div>
+
+            <!-- Tab 1: Final Vector Result (Side-by-Side Comparison) -->
+            <div id="tab-result" class="tab-pane active">
+                <div class="comparison-grid">
+                    <!-- Left: Original Target -->
+                    <div class="canvas-card">
+                        <div class="canvas-header">
+                            <span class="canvas-title"><i data-lucide="image"></i> 原始目标像素图</span>
+                            <span id="target-dim" class="badge">--</span>
+                        </div>
+                        <div class="canvas-body checkerboard">
+                            <img id="result-target-img" src="" alt="Target Image" class="canvas-img hidden">
+                            <div id="target-placeholder" class="canvas-placeholder">
+                                <i data-lucide="image"></i>
+                                <p>等待上传目标图像...</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Right: Scalable SVG Result -->
+                    <div class="canvas-card">
+                        <div class="canvas-header">
+                            <span class="canvas-title"><i data-lucide="sparkle"></i> VISTA 生成矢量图 (SVG)</span>
+                            <div class="canvas-actions">
+                                <button id="download-svg-btn" class="action-btn" disabled title="下载 SVG">
+                                    <i data-lucide="download"></i> 下载 SVG
+                                </button>
+                            </div>
+                        </div>
+                        <div class="canvas-body checkerboard">
+                            <div id="svg-container" class="svg-container"></div>
+                            <div id="svg-placeholder" class="canvas-placeholder">
+                                <i data-lucide="pen-tool"></i>
+                                <p>点击「开始矢量化」生成无损矢量 SVG</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tab 2: Optimization Animation (GIF with Click-to-Replay) -->
+            <div id="tab-animation" class="tab-pane hidden">
+                <div class="canvas-card full-card">
+                    <div class="canvas-header">
+                        <span class="canvas-title"><i data-lucide="play-circle"></i> DiffVG 优化演化过程动画 (点击画面可重播)</span>
+                        <button id="download-gif-btn" class="action-btn" disabled title="下载 GIF">
+                            <i data-lucide="download"></i> 下载 GIF
+                        </button>
+                    </div>
+                    <div class="canvas-body checkerboard animation-body">
+                        <img id="animation-gif" src="" alt="Optimization Animation" class="animation-img hidden" title="点击重新播放">
+                        <div id="gif-placeholder" class="canvas-placeholder">
+                            <i data-lucide="film"></i>
+                            <p>完成优化后此处展示渐进演化动画</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tab 3: Stage Overviews Dashboard -->
+            <div id="tab-stages" class="tab-pane hidden">
+                <div class="overviews-grid">
+                    <div class="overview-card">
+                        <h4>1. SLIC 超像素留洞全景</h4>
+                        <div class="overview-body checkerboard">
+                            <img id="ov-slic" src="" alt="SLIC Overview" class="overview-img hidden">
+                            <span class="ov-empty" id="ov-slic-empty">待生成</span>
+                        </div>
+                    </div>
+                    <div class="overview-card">
+                        <h4>2. SAM 语义先验全景</h4>
+                        <div class="overview-body checkerboard">
+                            <img id="ov-sam" src="" alt="SAM Overview" class="overview-img hidden">
+                            <span class="ov-empty" id="ov-sam-empty">待生成</span>
+                        </div>
+                    </div>
+                    <div class="overview-card">
+                        <h4>3. 孔洞实心化与连通拆分</h4>
+                        <div class="overview-body checkerboard">
+                            <img id="ov-origin" src="" alt="Origin Overview" class="overview-img hidden">
+                            <span class="ov-empty" id="ov-origin-empty">待生成</span>
+                        </div>
+                    </div>
+                    <div class="overview-card">
+                        <h4>4. 终版纯度同色融合 (pre_masks)</h4>
+                        <div class="overview-body checkerboard">
+                            <img id="ov-pre" src="" alt="Pre Overview" class="overview-img hidden">
+                            <span class="ov-empty" id="ov-pre-empty">待生成</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tab 4: Layer Gallery (Pre Masks) -->
+            <div id="tab-layers" class="tab-pane hidden">
+                <div class="gallery-header">
+                    <span id="gallery-count">共 0 个独立矢量图层</span>
+                </div>
+                <div id="layer-gallery" class="layer-gallery-grid">
+                    <div class="gallery-placeholder">暂无图层数据，请先执行矢量化处理</div>
+                </div>
+            </div>
+
+            <!-- Bottom Performance & Metrics Strip -->
+            <div class="card metrics-strip">
+                <div class="metric-item">
+                    <span class="metric-label">总执行耗时</span>
+                    <span id="stat-time" class="metric-value">-- s</span>
+                </div>
+                <div class="metric-divider"></div>
+                <div class="metric-item">
+                    <span class="metric-label">分割融合耗时</span>
+                    <span id="stat-seg-time" class="metric-value">-- s</span>
+                </div>
+                <div class="metric-divider"></div>
+                <div class="metric-item">
+                    <span class="metric-label">DiffVG 优化耗时</span>
+                    <span id="stat-vec-time" class="metric-value">-- s</span>
+                </div>
+                <div class="metric-divider"></div>
+                <div class="metric-item">
+                    <span class="metric-label">矢量图层数 (Shapes)</span>
+                    <span id="stat-shapes" class="metric-value">--</span>
+                </div>
+                <div class="metric-divider"></div>
+                <div class="metric-item">
+                    <span class="metric-label">控制点总数 (Points)</span>
+                    <span id="stat-points" class="metric-value">--</span>
+                </div>
+                <div class="metric-divider"></div>
+                <div class="metric-item">
+                    <span class="metric-label">最终 MSE 损失</span>
+                    <span id="stat-loss" class="metric-value">--</span>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <!-- Loading Modal Overlay -->
+    <div id="loading-overlay" class="loading-overlay hidden">
+        <div class="loading-modal">
+            <div class="spinner"></div>
+            <h3 id="loading-title">正在执行矢量化处理...</h3>
+            <p id="loading-subtitle">正在运行 SAM 语义分割、孔洞连通拆分与 DiffVG 可微渲染优化，请稍候</p>
+            <div class="loading-progress-bar">
+                <div class="progress-fill"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Application Script -->
+    <script src="/static/app.js"></script>
+</body>
+
+</html>
