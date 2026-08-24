@@ -115,7 +115,7 @@ def stage_segment(
     device = cfg.get("_resolved_device")
 
     st = time.time()
-    pre_mask_paths, bg_color = run_segmentation_late_fill(
+    pre_mask_paths, bg_color = run_segmentation(
         image_rgb=target_rgb,
         output_dir=run_dir,
         cfg=cfg,
