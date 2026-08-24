@@ -532,6 +532,7 @@ def svg_optimize(
     prune_inclusion_threshold: float = 0.8,
     refine_iters: int = 80,
     raster_threshold: float = 0.5,
+    transparent_svg: bool = False,
 ) -> Tuple[str, str, List[pydiffvg.Path], List[pydiffvg.ShapeGroup], float, List[Dict[str, Any]]]:
     """主优化 -> 几何光栅化剪枝 -> 短迭代精修。"""
     st = time.time()
@@ -648,10 +649,14 @@ def svg_optimize(
         metrics[-1]["mse"] = round(final_mse, 6)
 
     svg_path = os.path.join(result_path, "final.svg")
-    transparent_svg = bool(cfg.get("transparent_svg", cfg.get("preprocess", {}).get("transparent_svg", False)))
     if transparent_svg and len(shapes) > 1 and len(shape_groups) > 1:
-        # 丢弃最底部的全屏背景图层 0，生成纯净透明底 SVG
-        _save_svg_with_viewbox(svg_path, canvas_width, canvas_height, shapes[1:], shape_groups[1:])
+        # 丢弃最底部的全屏背景图层 0，生成纯净透明底 SVG（需深拷贝并重映射 shape_ids 索引）
+        import copy
+        trans_shapes = shapes[1:]
+        trans_groups = copy.deepcopy(shape_groups[1:])
+        for new_idx, grp in enumerate(trans_groups):
+            grp.shape_ids = torch.tensor([new_idx], device=grp.shape_ids.device)
+        _save_svg_with_viewbox(svg_path, canvas_width, canvas_height, trans_shapes, trans_groups)
     else:
         _save_svg_with_viewbox(svg_path, canvas_width, canvas_height, shapes, shape_groups)
 
@@ -750,6 +755,7 @@ def run_vectorization(
         prune_inclusion_threshold=float(prune_cfg.get("inclusion_threshold", 0.8)),
         refine_iters=int(prune_cfg.get("refine_iters", 80)),
         raster_threshold=float(prune_cfg.get("raster_threshold", 0.5)),
+        transparent_svg=bool(cfg.get("transparent_svg", cfg.get("preprocess", {}).get("transparent_svg", False))),
     )
     elapsed = time.time() - st
 
