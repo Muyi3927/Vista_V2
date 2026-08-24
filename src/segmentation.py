@@ -530,7 +530,9 @@ def process_morphology_keep_holes(
 
         for idx, item in enumerate(pure_regions):
             if save_original_masks:
-                out_name = f"{idx:03d}_{item['source']}_m{item['orig_idx']:02d}_d{item['depth']}_cc{item['cc_idx']}.png"
+                std_str = f"s{int(round(item.get('homogeneity_std', 0.0))):02d}"
+                area_str = f"a{int(item.get('area', 0))}"
+                out_name = f"{idx:03d}_{item['source']}_m{item.get('orig_idx', 0):02d}_{area_str}_{std_str}_cc{item.get('cc_idx', 1)}.png"
                 _save_mask_item(
                     item["mask_image"], item["fill_color"], orig_dir, orig_col_dir,
                     out_name, 0, (h, w), save_color_mask
@@ -569,9 +571,6 @@ def perform_fusion_and_save(
     self_thresh = float(cfg.get("self_pure_std_thresh", cfg.get("max_pure_std_thresh", cfg.get("preprocess", {}).get("self_pure_std_thresh", 15.0))))
     parent_thresh = float(cfg.get("parent_pure_std_thresh", cfg.get("preprocess", {}).get("parent_pure_std_thresh", 3.0)))
     color_diff_thresh = float(cfg.get("color_diff_thresh", cfg.get("preprocess", {}).get("color_diff_thresh", 6.0)))
-    save_nms_masks = bool(cfg.get("save_nms_masks", cfg.get("save_options", {}).get("save_nms_masks", True)))
-    save_color_mask = bool(cfg.get("save_color_mask", cfg.get("save_options", {}).get("save_color_mask", True)))
-    export_size = int(cfg.get("export_size", cfg.get("preprocess", {}).get("target_size", 0)))
 
     # 拆解来源
     sam_list = [c for c in candidates if c["source"] == "sam"]
@@ -652,26 +651,6 @@ def perform_fusion_and_save(
         item["nms_idx"] = idx
     n = len(surviving)
     to_remove = set()
-
-    def _get_mask_filename(idx: int, item: Dict) -> str:
-        if item["source"] == "bg":
-            return f"{idx:03d}_bg.png"
-        std_str = f"s{int(round(item.get('homogeneity_std', 0.0))):02d}"
-        area_str = f"a{int(item.get('area', 0))}"
-        return f"{idx:03d}_{item['source']}_m{item.get('orig_idx', 0):02d}_{area_str}_{std_str}_cc{item.get('cc_idx', 1)}.png"
-
-    # 按照面积大小另存 IoU 去重后、纯度吸收前的中间掩码与彩色掩码
-    if output_sub_dir is not None and save_nms_masks:
-        nms_dir = output_sub_dir / "nms_masks"
-        nms_col_dir = output_sub_dir / "nms_colored_masks" if save_color_mask else None
-        for idx, item in enumerate(surviving):
-            out_name = _get_mask_filename(idx, item)
-            _save_mask_item(
-                item["mask_image"], item["fill_color"], nms_dir, nms_col_dir,
-                out_name, 0, (h, w), save_color_mask
-            )
-        _save_overview_colored(surviving, output_sub_dir / "nms_overview_colored.png", (h, w), 0)
-        print(f"  --> [Stage 3.1 & 3.2] 完成！IoU去重后留存 {len(surviving)} 个掩码已保存在: {nms_dir}")
 
     # 3.3 检查所有精选候选的直接父级同色从属关系（保留自身纯色和父级纯色判断，全面升级为 CIELAB Delta E 色差）
     cielab_diff_thresh = float(color_diff_thresh) if color_diff_thresh is not None else 6.0

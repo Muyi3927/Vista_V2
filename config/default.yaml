@@ -21,7 +21,7 @@ paths:
   # 输入图像文件或包含图像的目录路径
   input: /home/jh/research/projects/VISTA/dataset/pairs_50/tmp
   # 矢量化结果（SVG/GIF/JSON）输出根目录
-  output: outputs/pairs_50_1
+  output: outputs/pairs_50_2
   # SAM 语义分割模型权重路径
   sam_checkpoint: checkpoints/sam_vit_h_4b8939.pth
 
@@ -151,16 +151,14 @@ prune:
   raster_threshold: 0.5
 
 # -----------------------------------------------------------------------------
-# 中间过程输出与可视化结果保存开关（默认全部开启）
+# 中间过程输出与可视化结果保存开关（三大核心阶段掩码目录：raw -> origin -> pre）
 # -----------------------------------------------------------------------------
 save_options:
-  # 是否保存阶段1原始分割掩码 (raw_sam_masks / raw_slic_masks)
+  # 阶段 1：是否保存原生分割掩码 (raw_sam_masks / raw_slic_masks)
   save_raw_masks: true
-  # 是否保存阶段2形态学拆解后的原版掩码 (origin_masks)
+  # 阶段 2：是否保存单连通拆解与智能平滑后的原生掩码 (origin_masks)
   save_origin_masks: true
-  # 是否保存阶段3 IoU去重后的中间掩码 (nms_masks)
-  save_nms_masks: true
-  # 是否保存阶段3最终精炼掩码 (pre_masks)
+  # 阶段 3：是否保存预处理完成终极实心掩码 (pre_masks)
   save_pre_masks: true
   # 是否同步保存单图层真彩掩码 png
   save_color_mask: true

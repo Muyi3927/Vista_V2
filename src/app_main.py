@@ -139,18 +139,16 @@ def img_to_svg_full(
     svg_path = vec.get("svg_path", os.path.join(run_dir, "final.svg"))
     gif_path = vec.get("gif_path", os.path.join(run_dir, "animation.gif"))
 
-    # 收集各阶段生成的可视化全景图
+    # 收集各阶段生成的可视化全景图 (三大阶段: raw -> origin -> pre)
     slic_ov = os.path.join(run_dir, "slic_overview_colored.png")
     sam_ov = os.path.join(run_dir, "sam_overview_colored.png")
     origin_ov = os.path.join(run_dir, "origin_overview_colored.png")
-    nms_ov = os.path.join(run_dir, "nms_overview_colored.png")
     pre_ov = os.path.join(run_dir, "pre_overview_colored.png")
 
     overviews = {
         "slic": slic_ov if os.path.isfile(slic_ov) else "",
         "sam": sam_ov if os.path.isfile(sam_ov) else "",
         "origin": origin_ov if os.path.isfile(origin_ov) else "",
-        "nms": nms_ov if os.path.isfile(nms_ov) else "",
         "pre": pre_ov if os.path.isfile(pre_ov) else "",
     }
 

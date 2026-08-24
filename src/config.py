@@ -150,11 +150,10 @@ def load_config(path: Optional[str] = None, overrides: Optional[dict] = None) ->
     prune.setdefault("refine_iters", 100)
     prune.setdefault("raster_threshold", 0.5)
 
-    # 输出保存开关
+    # 输出保存开关 (三大阶段: raw -> origin -> pre)
     save_opts = cfg.setdefault("save_options", {})
     save_opts.setdefault("save_raw_masks", True)
     save_opts.setdefault("save_origin_masks", True)
-    save_opts.setdefault("save_nms_masks", True)
     save_opts.setdefault("save_pre_masks", True)
     save_opts.setdefault("save_color_mask", True)
     save_opts.setdefault("save_overview_images", True)
