@@ -66,8 +66,26 @@ def create_job(
     target_img_dir = os.path.join(run_dir, "target_img")
     os.makedirs(target_img_dir, exist_ok=True)
 
-    target_size = int(cfg.get("preprocess", {}).get("target_size", 0))
-    target_pil = load_and_resize(image_path, target_size=target_size)
+    pre_cfg = cfg.get("preprocess", {})
+    target_size = int(pre_cfg.get("target_size", 0))
+    denoise = bool(pre_cfg.get("denoise", False))
+    denoise_sigma_color = float(pre_cfg.get("denoise_sigma_color", 35.0))
+    denoise_sigma_space = float(pre_cfg.get("denoise_sigma_space", 35.0))
+    bg_color_cfg = pre_cfg.get("composite_bg_color", None)
+    if bg_color_cfg is not None and isinstance(bg_color_cfg, (list, tuple)) and len(bg_color_cfg) >= 3:
+        bg_color = tuple([int(c) for c in bg_color_cfg[:3]])
+    else:
+        bg_color = None
+
+    target_pil, alpha_mask = load_and_resize(
+        image_path,
+        target_size=target_size,
+        bg_color=bg_color,
+        denoise=denoise,
+        denoise_sigma_color=denoise_sigma_color,
+        denoise_sigma_space=denoise_sigma_space,
+        return_alpha_mask=True,
+    )
     target_path = save_target_image(target_pil, target_img_dir, os.path.basename(image_path))
     target_rgb = np.array(target_pil)
 
@@ -77,6 +95,7 @@ def create_job(
         "target_path": target_path,
         "target_rgb": target_rgb,
         "image_name": stem,
+        "alpha_mask": alpha_mask,
     }
 
 
@@ -85,6 +104,7 @@ def stage_segment(
     target_rgb: np.ndarray,
     cfg: Optional[Dict[str, Any]] = None,
     preloaded_model=None,
+    alpha_mask: Optional[np.ndarray] = None,
 ) -> Dict[str, Any]:
     """
     阶段 1：运行 SAM + SLIC 候选分割、孔洞提取、连通拆分与分层融合。
@@ -99,6 +119,7 @@ def stage_segment(
         cfg=cfg,
         preloaded_model=preloaded_model,
         device=device,
+        alpha_mask=alpha_mask,
     )
     elapsed = time.time() - st
 
@@ -169,7 +190,13 @@ def process_single_image(
     target_rgb = job["target_rgb"]
 
     # 1. 语义与超像素分割与融合
-    seg = stage_segment(run_dir, target_rgb=target_rgb, cfg=cfg, preloaded_model=preloaded_model)
+    seg = stage_segment(
+        run_dir,
+        target_rgb=target_rgb,
+        cfg=cfg,
+        preloaded_model=preloaded_model,
+        alpha_mask=job.get("alpha_mask"),
+    )
 
     # 2. 贝塞尔拟合与可微优化
     vec = stage_vectorize(

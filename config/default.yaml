@@ -52,6 +52,17 @@ slic:
 preprocess:
   # 图像预处理尺寸（0 表示保持原始分辨率，>0 表示缩放到指定最长边）
   target_size: 0
+  # 是否开启轻量保边去噪滤波 (Bilateral Filter)，抑制 JPEG 噪点块
+  denoise: false
+  # 双边滤波色彩方差与空间方差
+  denoise_sigma_color: 35.0
+  denoise_sigma_space: 35.0
+  # 透明图 (RGBA) 合成底色 [R, G, B]（null 表示自适应前景亮度自动选取反差色底）
+  composite_bg_color: null
+  # 是否将 RGBA 提取的原生 Alpha 前景轮廓作为高优先级候选图层
+  use_alpha_mask: true
+  # 导出最终 SVG 时是否去除全屏底色矩形，保留天然透明底
+  transparent_svg: false
   # 最小有效掩码面积比例（若 >= 1 则为绝对像素数）
   min_area: 0.00015
   # SAM 压制重叠 SLIC 候选的 IoU 阈值

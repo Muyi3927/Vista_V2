@@ -633,6 +633,7 @@ def run_segmentation(
     cfg: Dict[str, Any],
     preloaded_model=None,
     device: Optional[torch.device] = None,
+    alpha_mask: Optional[np.ndarray] = None,
 ) -> Tuple[List[str], Tuple[int, int, int]]:
     """
     对 image_rgb 运行完整的 SAM + SLIC 混合分割与预处理融合流水线。
@@ -643,8 +644,29 @@ def run_segmentation(
 
     use_sam = bool(cfg.get("use_sam", cfg.get("sam", {}).get("enabled", True)))
     use_slic = bool(cfg.get("use_slic", cfg.get("slic", {}).get("enabled", True)))
+    use_alpha_mask = bool(cfg.get("use_alpha_mask", cfg.get("preprocess", {}).get("use_alpha_mask", True)))
 
     raw_proposals = []
+
+    # 若输入为透明图且提供了 alpha_mask，将前景轮廓作为一个高优先级原生候选图层加入
+    if use_alpha_mask and alpha_mask is not None:
+        fg_area = int(np.sum(alpha_mask > 127))
+        h, w = image_rgb.shape[:2]
+        if 0 < fg_area < h * w:
+            print(f"  [Alpha 掩码] 提取原生透明前景掩码 (面积={fg_area}px)，注入候选图层池")
+            alpha_item = {
+                "source": "alpha",
+                "orig_idx": 0,
+                "depth": 0,
+                "cc_idx": 0,
+                "area": fg_area,
+                "mask_image": alpha_mask.copy(),
+                "fill_color": list(get_canvas_background_color(image_rgb)),
+                "orig_sort_idx": 0,
+                "homogeneity_std": 0.0,
+            }
+            raw_proposals.append(alpha_item)
+
     if use_slic:
         slic_props = get_raw_slic_proposals(image_rgb, output_path, cfg)
         raw_proposals.extend(slic_props)

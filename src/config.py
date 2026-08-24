@@ -98,6 +98,12 @@ def load_config(path: Optional[str] = None, overrides: Optional[dict] = None) ->
     # 预处理与掩码融合默认参数
     pre = cfg.setdefault("preprocess", {})
     pre.setdefault("target_size", 0)
+    pre.setdefault("denoise", False)
+    pre.setdefault("denoise_sigma_color", 35.0)
+    pre.setdefault("denoise_sigma_space", 35.0)
+    pre.setdefault("composite_bg_color", None)
+    pre.setdefault("use_alpha_mask", True)
+    pre.setdefault("transparent_svg", False)
     pre.setdefault("min_area", 0.00015)
     pre.setdefault("iou_sam_slic_thresh", 0.9)
     pre.setdefault("iou_threshold", 0.9)

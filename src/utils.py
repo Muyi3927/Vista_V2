@@ -195,10 +195,21 @@ def get_image_dominant_color(image, n_clusters=3, max_samples=10000):
     # 确保只返回 RGB 三个通道（防止原图带有 Alpha 通道报错）
     return tuple(main_color[:3])
 
-def load_and_resize(image_path: str, target_size: int = 512, bg_color: Tuple[int, int, int] = (255, 255, 255)):
+def load_and_resize(
+    image_path: str,
+    target_size: int = 512,
+    bg_color: Optional[Tuple[int, int, int]] = None,
+    denoise: bool = False,
+    denoise_sigma_color: float = 35.0,
+    denoise_sigma_space: float = 35.0,
+    return_alpha_mask: bool = False,
+):
     """
-    加载图像并转换为 RGB，如果有透明度/Alpha 通道则用纯白色背景(255, 255, 255)合成填充。
-    然后按比例缩放图像，返回 PIL.Image 图像对象。
+    加载图像并转换为 RGB，如果有透明度/Alpha 通道则合成填充。
+    支持：
+    1. 自适应对比色或固定色 Alpha 合成，避免前景亮白被白底吞噬；
+    2. 可选保边双边滤波去噪 (Bilateral Filter)，抑制 JPEG 压缩噪点；
+    3. 可选返回原图提取的二值 Alpha 前景掩码。
     """
     print("预处理目标图像...")
     image = Image.open(image_path)
@@ -212,25 +223,62 @@ def load_and_resize(image_path: str, target_size: int = 512, bg_color: Tuple[int
     elif "A" in image.getbands():
         has_alpha = True
 
+    alpha_mask_np = None
+
     if has_alpha:
         # 转为标准的 RGBA 进行真实 Alpha 混合
         rgba_img = image.convert("RGBA")
-        # 创建指定纯色背景（默认纯白 255, 255, 255）
-        bg = Image.new("RGBA", rgba_img.size, (bg_color[0], bg_color[1], bg_color[2], 255))
-        # 将前景与白色背景合成，生成无黑边的纯净 RGB 图像
+        np_rgba = np.array(rgba_img)
+        alpha_channel = np_rgba[:, :, 3]
+
+        if return_alpha_mask:
+            alpha_mask_np = (alpha_channel > 10).astype(np.uint8) * 255
+
+        # 决定合成底色：若未指定，则进行自适应背景色计算（避免前景整体为纯白时被纯白底吞没）
+        if bg_color is None:
+            fg_pixels = np_rgba[alpha_channel > 20, :3]
+            if len(fg_pixels) > 0:
+                mean_fg = np.mean(fg_pixels, axis=0)
+                # 若前景主体为极高亮白色（平均亮度 > 235），则使用黑色底/深色底提供对比
+                if np.mean(mean_fg) > 235:
+                    chosen_bg = (0, 0, 0)
+                else:
+                    chosen_bg = (255, 255, 255)
+            else:
+                chosen_bg = (255, 255, 255)
+        else:
+            chosen_bg = bg_color
+
+        # 创建指定纯色背景并合成
+        bg = Image.new("RGBA", rgba_img.size, (chosen_bg[0], chosen_bg[1], chosen_bg[2], 255))
         image = Image.alpha_composite(bg, rgba_img).convert("RGB")
     else:
         image = image.convert("RGB")
 
     # 2. 缩放图像，保持宽高比 (target_size <= 0 表示保持原图大小不缩放)
-    if target_size <= 0:
-        return image
-    w, h = image.size
-    scale = target_size / max(w, h)
-    new_size = (int(w * scale), int(h * scale))
-    resized = image.resize(new_size, Image.Resampling.LANCZOS)
+    if target_size > 0:
+        w, h = image.size
+        scale = target_size / max(w, h)
+        new_size = (int(w * scale), int(h * scale))
+        image = image.resize(new_size, Image.Resampling.LANCZOS)
+        if alpha_mask_np is not None:
+            alpha_mask_pil = Image.fromarray(alpha_mask_np).resize(new_size, Image.Resampling.NEAREST)
+            alpha_mask_np = np.array(alpha_mask_pil)
 
-    return resized
+    # 3. 可选保边双边滤波去噪 (Bilateral Filter)
+    if denoise:
+        img_np = np.array(image)
+        denoised_np = cv2.bilateralFilter(
+            img_np,
+            d=5,
+            sigmaColor=float(denoise_sigma_color),
+            sigmaSpace=float(denoise_sigma_space),
+        )
+        image = Image.fromarray(denoised_np)
+
+    if return_alpha_mask:
+        return image, alpha_mask_np
+    return image
 
   
 def resolve_min_area(min_area, target_area: int) -> int:

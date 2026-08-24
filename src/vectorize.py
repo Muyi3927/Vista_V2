@@ -648,7 +648,12 @@ def svg_optimize(
         metrics[-1]["mse"] = round(final_mse, 6)
 
     svg_path = os.path.join(result_path, "final.svg")
-    _save_svg_with_viewbox(svg_path, canvas_width, canvas_height, shapes, shape_groups)
+    transparent_svg = bool(cfg.get("transparent_svg", cfg.get("preprocess", {}).get("transparent_svg", False)))
+    if transparent_svg and len(shapes) > 1 and len(shape_groups) > 1:
+        # 丢弃最底部的全屏背景图层 0，生成纯净透明底 SVG
+        _save_svg_with_viewbox(svg_path, canvas_width, canvas_height, shapes[1:], shape_groups[1:])
+    else:
+        _save_svg_with_viewbox(svg_path, canvas_width, canvas_height, shapes, shape_groups)
 
     if img_render is not None:
         frames.append(
