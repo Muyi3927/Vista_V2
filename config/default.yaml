@@ -19,9 +19,9 @@ run:
 
 paths:
   # 输入图像文件或包含图像的目录路径
-  input: dataset/logo_1.png
+  input: /home/jh/research/projects/VISTA/dataset/pairs_50
   # 矢量化结果（SVG/GIF/JSON）输出根目录
-  output: outputs
+  output: outputs/pairs_50
   # SAM 语义分割模型权重路径
   sam_checkpoint: checkpoints/sam_vit_h_4b8939.pth
 
@@ -65,7 +65,7 @@ preprocess:
   # 图像预处理尺寸（0 表示保持原始分辨率，>0 表示缩放到指定最长边）
   target_size: 0
   # 是否开启轻量保边去噪滤波 (Bilateral Filter)，抑制 JPEG 噪点块
-  denoise: false
+  denoise: true
   # 双边滤波色彩方差与空间方差
   denoise_sigma_color: 35.0
   denoise_sigma_space: 35.0
@@ -73,8 +73,8 @@ preprocess:
   composite_bg_color: null
   # 是否将 RGBA 提取的原生 Alpha 前景轮廓作为高优先级候选图层
   use_alpha_mask: true
-  # 导出最终 SVG 时是否去除全屏底色矩形，保留天然透明底
-  transparent_svg: false
+  # 导出最终 SVG 时是否去除全屏底色矩形 (null/auto: 自动跟随输入图像是否有透明背景；true: 强制透明；false: 强制保留实心背景)
+  transparent_svg: null
   # 最小有效掩码面积比例（若 >= 1 则为绝对像素数）
   min_area: 0.00015
   # SAM 压制重叠 SLIC 候选的 IoU 阈值（推荐 0.85）
@@ -122,7 +122,7 @@ optimize:
   # 最大优化迭代步数
   num_iters: 1000
   # 是否开启描边优化
-  is_stroke: false
+  is_stroke: true
   # 早停容忍步数
   early_stopping_patience: 20
   # 早停最小改善阈值

@@ -731,8 +731,76 @@ def perform_fusion_and_save(
 
 
 # ==============================================================================
-# 分割阶段顶层入口
+# 实验性接口：后置填洞流水线 (Late Hole-Filling Pipeline)
+# 阶段 2: 保持中空拓扑 + 真实物理色彩采样 + 形态学平滑 + 单连通拆分 (不填洞)
+# 阶段 3: 基于 100% 真实纯度进行跨界去重与父子同色吸收
+# 阶段 3 尾声: 对最终筛选出的存活图层执行几何填洞实心化
 # ==============================================================================
+
+def process_morphology_keep_holes(
+    image_rgb: np.ndarray,
+    raw_proposals: List[Dict[str, Any]],
+    output_sub_dir: Optional[Path],
+    cfg: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """
+    【实验性阶段 2】：暂不填洞，仅执行形态学平滑与单连通组件拆解。
+    保持原生中空拓扑，保证采集到的色彩方差 (homogeneity_std) 100% 真实，不被洞内异色污染。
+    """
+    print(f"\n==================================================================")
+    print(f" [Stage 2 - Pure Morphology (Keep Holes)] 保持中空拓扑形态平滑 & 单连通拆解...")
+    print(f"==================================================================")
+    h, w = image_rgb.shape[:2]
+    min_area = resolve_min_area(cfg.get("min_area", cfg.get("preprocess", {}).get("min_area", 0.00015)), h * w)
+    save_original_masks = bool(cfg.get("save_original_masks", cfg.get("save_origin_masks", cfg.get("save_options", {}).get("save_origin_masks", True))))
+    save_color_mask = bool(cfg.get("save_color_mask", cfg.get("save_options", {}).get("save_color_mask", True)))
+
+    pure_regions = []
+
+    for idx, p in enumerate(raw_proposals):
+        raw_mask = p["mask_image"]
+        # 直接对原始带洞 Mask 进行形态学平滑
+        smoothed_m, _ = _smart_morphology_preprocess(raw_mask, orig_area=int((raw_mask > 0).sum()))
+        num_labels, labels = cv2.connectedComponents(smoothed_m)
+
+        for comp_id in range(1, num_labels):
+            comp_mask = (labels == comp_id).astype(np.uint8) * 255
+            comp_area = int((comp_mask > 0).sum())
+            if comp_area >= min_area:
+                # 仅对真实前景像素进行纯度采样，绝不污染洞内背景色
+                mean_col, std_val = _get_dominant_color_and_homogeneity(image_rgb, comp_mask)
+                pure_regions.append({
+                    "mask_image": comp_mask,
+                    "area": comp_area,
+                    "fill_color": mean_col.tolist(),
+                    "homogeneity_std": std_val,
+                    "source": p["source"],
+                    "orig_idx": p["orig_idx"],
+                    "depth": 0,
+                    "cc_idx": comp_id,
+                })
+
+    pure_regions = sorted(pure_regions, key=lambda x: x["area"], reverse=True)
+    for idx, item in enumerate(pure_regions):
+        item["orig_sort_idx"] = idx
+    print(f"  --> [Stage 2 Pure] 完成！生成保留原生纯度的单连通图层共 {len(pure_regions)} 个")
+
+    if output_sub_dir is not None:
+        orig_dir = output_sub_dir / "origin_masks" if save_original_masks else None
+        orig_col_dir = output_sub_dir / "origin_colored_masks" if (save_original_masks and save_color_mask) else None
+
+        for idx, item in enumerate(pure_regions):
+            if save_original_masks:
+                out_name = f"{idx:03d}_{item['source']}_m{item['orig_idx']:02d}_d{item['depth']}_cc{item['cc_idx']}.png"
+                _save_mask_item(
+                    item["mask_image"], item["fill_color"], orig_dir, orig_col_dir,
+                    out_name, 0, (h, w), save_color_mask
+                )
+
+        _save_overview_colored(pure_regions, output_sub_dir / "origin_overview_colored.png", (h, w), 0)
+
+    return pure_regions
+
 
 def run_segmentation(
     image_rgb: np.ndarray,
@@ -743,7 +811,7 @@ def run_segmentation(
     alpha_mask: Optional[np.ndarray] = None,
 ) -> Tuple[List[str], Tuple[int, int, int]]:
     """
-    对 image_rgb 运行完整的 SAM + SLIC 混合分割与预处理融合流水线。
+    【原版默认分割流水线】：在阶段 2 进行闭合孔洞填实与单连通拆解。
     返回：(pre_mask_paths 掩码路径列表, bg_color 画布背景色)
     """
     output_path = Path(output_dir)
@@ -755,12 +823,10 @@ def run_segmentation(
 
     raw_proposals = []
 
-    # 若输入为透明图且提供了 alpha_mask，将前景轮廓作为一个高优先级原生候选图层加入
     if use_alpha_mask and alpha_mask is not None:
         fg_area = int(np.sum(alpha_mask > 127))
         h, w = image_rgb.shape[:2]
         if 0 < fg_area < h * w:
-            print(f"  [Alpha 掩码] 提取原生透明前景掩码 (面积={fg_area}px)，注入候选图层池")
             alpha_item = {
                 "source": "alpha",
                 "orig_idx": 0,
@@ -790,6 +856,84 @@ def run_segmentation(
     for item in sorted(pre_dir.glob("*.png")):
         if item.name != "000_bg.png" and not item.name.endswith("_debug.png"):
             pre_paths.append(str(item))
+
+    bg_color = tuple(get_canvas_background_color(image_rgb))
+    return pre_paths, bg_color
+
+
+def run_segmentation_late_fill(
+    image_rgb: np.ndarray,
+    output_dir: str,
+    cfg: Dict[str, Any],
+    preloaded_model=None,
+    device: Optional[torch.device] = None,
+    alpha_mask: Optional[np.ndarray] = None,
+) -> Tuple[List[str], Tuple[int, int, int]]:
+    """
+    【新实验性顶层分割接口】：后置填洞 (Late Hole-Filling)。
+    阶段 2 保持中空真实采样 -> 阶段 3 纯度融合去重 -> 最终结果实心化输出至 pre_masks。
+    """
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    use_sam = bool(cfg.get("use_sam", cfg.get("sam", {}).get("enabled", True)))
+    use_slic = bool(cfg.get("use_slic", cfg.get("slic", {}).get("enabled", True)))
+    use_alpha_mask = bool(cfg.get("use_alpha_mask", cfg.get("preprocess", {}).get("use_alpha_mask", True)))
+
+    raw_proposals = []
+
+    if use_alpha_mask and alpha_mask is not None:
+        fg_area = int(np.sum(alpha_mask > 127))
+        h, w = image_rgb.shape[:2]
+        if 0 < fg_area < h * w:
+            alpha_item = {
+                "source": "alpha",
+                "orig_idx": 0,
+                "depth": 0,
+                "cc_idx": 0,
+                "area": fg_area,
+                "mask_image": alpha_mask.copy(),
+                "fill_color": list(get_canvas_background_color(image_rgb)),
+                "orig_sort_idx": 0,
+                "homogeneity_std": 0.0,
+            }
+            raw_proposals.append(alpha_item)
+
+    if use_slic:
+        slic_props = get_raw_slic_proposals(image_rgb, output_path, cfg)
+        raw_proposals.extend(slic_props)
+
+    if use_sam:
+        sam_props = get_raw_sam_proposals(image_rgb, output_path, cfg, preloaded_model=preloaded_model, device=device)
+        raw_proposals.extend(sam_props)
+
+    # 1. 阶段 2: 保持中空进行形态学平滑与单连通拆解 (不填洞)
+    pure_proposals = process_morphology_keep_holes(image_rgb, raw_proposals, output_path, cfg)
+
+    # 2. 阶段 3: 在 100% 真实纯度下执行跨界压制与父子同色吸收
+    fused_masks = perform_fusion_and_save(image_rgb, pure_proposals, output_path, cfg)
+
+    # 3. 最终几何实心化：对最终存活的各图层填洞，为阶段 4 贝塞尔闭合轮廓拟合提供实心几何底盘
+    print("  [后置几何实心化] 对最终精简图层执行闭合孔洞填实...")
+    save_color_mask = bool(cfg.get("save_color_mask", cfg.get("save_options", {}).get("save_color_mask", True)))
+    pre_dir = output_path / "pre_masks"
+    pre_col_dir = output_path / "pre_colored_masks" if save_color_mask else None
+    pre_paths = []
+
+    for idx, item in enumerate(fused_masks):
+        if item["source"] != "bg":
+            filled_m, _ = _fill_holes(item["mask_image"])
+            item["mask_image"] = filled_m
+            out_name = f"{idx:03d}_{item['source']}_m{item['orig_idx']:02d}_d{item['depth']}_cc{item['cc_idx']}.png"
+            out_file = pre_dir / out_name
+            _save_mask_item(
+                item["mask_image"], item["fill_color"], pre_dir, pre_col_dir,
+                out_name, 0, image_rgb.shape[:2], save_color_mask
+            )
+            pre_paths.append(str(out_file))
+
+    # 同步重新生成实心化后的全景预览彩图
+    _save_overview_colored(fused_masks, output_path / "pre_overview_colored.png", image_rgb.shape[:2], 0)
 
     bg_color = tuple(get_canvas_background_color(image_rgb))
     return pre_paths, bg_color

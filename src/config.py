@@ -108,7 +108,7 @@ def load_config(path: Optional[str] = None, overrides: Optional[dict] = None) ->
     pre.setdefault("denoise_sigma_space", 35.0)
     pre.setdefault("composite_bg_color", None)
     pre.setdefault("use_alpha_mask", True)
-    pre.setdefault("transparent_svg", False)
+    pre.setdefault("transparent_svg", None)
     pre.setdefault("min_area", 0.00015)
     pre.setdefault("iou_sam_slic_thresh", 0.85)
     pre.setdefault("iou_threshold", 0.90)

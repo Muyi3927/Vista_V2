@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from config import get_config, load_config
-from segmentation import run_segmentation
+from segmentation import run_segmentation, run_segmentation_late_fill
 from utils import load_and_resize, save_target_image
 from vectorize import run_vectorization
 
@@ -88,6 +88,7 @@ def create_job(
     )
     target_path = save_target_image(target_pil, target_img_dir, os.path.basename(image_path))
     target_rgb = np.array(target_pil)
+    has_alpha = (alpha_mask is not None and np.sum(alpha_mask < 250) > 0)
 
     return {
         "run_dir": run_dir,
@@ -96,6 +97,7 @@ def create_job(
         "target_rgb": target_rgb,
         "image_name": stem,
         "alpha_mask": alpha_mask,
+        "has_alpha": has_alpha,
     }
 
 
@@ -113,7 +115,7 @@ def stage_segment(
     device = cfg.get("_resolved_device")
 
     st = time.time()
-    pre_mask_paths, bg_color = run_segmentation(
+    pre_mask_paths, bg_color = run_segmentation_late_fill(
         image_rgb=target_rgb,
         output_dir=run_dir,
         cfg=cfg,
@@ -199,12 +201,21 @@ def process_single_image(
     )
 
     # 2. 贝塞尔拟合与可微优化
+    # 若配置未强制指定 transparent_svg (即为 auto/null)，则根据原图是否为透明图自适应决定：
+    # 输入有透明底(无背景) -> 导出无背景透明 SVG；输入是实心RGB(有背景) -> 导出保留背景 SVG
+    vec_cfg = deepcopy(cfg)
+    user_trans = (cfg.get("preprocess") or {}).get("transparent_svg")
+    if user_trans is None or str(user_trans).lower() == "auto":
+        vec_cfg.setdefault("preprocess", {})["transparent_svg"] = bool(job.get("has_alpha", False))
+    else:
+        vec_cfg.setdefault("preprocess", {})["transparent_svg"] = bool(user_trans)
+
     vec = stage_vectorize(
         run_dir,
         target_rgb=target_rgb,
         pre_mask_paths=seg["pre_masks"],
         bg_color=seg["bg_color"],
-        cfg=cfg,
+        cfg=vec_cfg,
         final_out_dir=final_out_dir,
     )
 
