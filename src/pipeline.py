@@ -115,7 +115,7 @@ def stage_segment(
     device = cfg.get("_resolved_device")
 
     st = time.time()
-    pre_mask_paths, bg_color = run_segmentation(
+    pre_mask_paths, bg_color, stage3_removal_logs = run_segmentation(
         image_rgb=target_rgb,
         output_dir=run_dir,
         cfg=cfg,
@@ -130,6 +130,7 @@ def stage_segment(
         "pre_masks": pre_mask_paths,
         "num_masks": len(pre_mask_paths),
         "bg_color": bg_color,
+        "stage3_removal_logs": stage3_removal_logs,
         "time_sec": round(elapsed, 4),
     }
 
@@ -219,6 +220,19 @@ def process_single_image(
         final_out_dir=final_out_dir,
     )
 
+    # 3. 记录全流程决策日志 (decision_log.json)：详细记录被移除的掩码、同色吸收原因与阶段4几何剪枝信息
+    decision_log = {
+        "image_path": image_path,
+        "run_dir": run_dir,
+        "stage3_color_absorption_removals": seg.get("stage3_removal_logs", []),
+        "stage4_geometry_pruning_removals": vec.get("prune_logs", []),
+        "total_absorbed_masks_stage3": len(seg.get("stage3_removal_logs", [])),
+        "total_pruned_paths_stage4": len(vec.get("prune_logs", [])),
+    }
+    decision_log_path = os.path.join(run_dir, "decision_log.json")
+    with open(decision_log_path, "w", encoding="utf-8") as f:
+        json.dump(decision_log, f, indent=2, ensure_ascii=False)
+
     summary = {
         "run_dir": run_dir,
         "image_path": image_path,
@@ -234,6 +248,7 @@ def process_single_image(
             "svg_path": vec.get("svg_path"),
             "gif_path": vec.get("gif_path"),
         },
+        "decision_log": decision_log,
         "total_time_sec": round(seg["time_sec"] + vec.get("time_consuming", 0), 4),
     }
 

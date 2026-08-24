@@ -465,6 +465,8 @@ def prune_shapes_by_rendered_masks(
         # 累积自己的遮挡给下方的图层
         occlusion_map = np.logical_or(occlusion_map, m_bool)
 
+    prune_removal_logs = []
+
     # 2. 自顶向下进行三维判定
     for i in range(n - 1, 0, -1):
         if i in to_remove:
@@ -479,7 +481,15 @@ def prune_shapes_by_rendered_masks(
         # 规则 A：完全被上方遮挡或仅剩微弱噪点（有效可见像素 < 10px）
         if current_area < 8 or visible_area < 8:
             to_remove.add(i)
-            # print(f"  [剪枝] 移除 shape #{i} (可见像素={visible_area}px): 几乎被完全遮挡或极小噪点")
+            log_msg = f"[阶段4 几何剪枝] 移除 shape #{i} (总面积={current_area}px, 有效可见像素={visible_area}px): 几乎被上方完全遮挡或极小噪点"
+            print(f"  {log_msg}")
+            prune_removal_logs.append({
+                "stage": "stage4_geometry_pruning",
+                "shape_id": i,
+                "total_area": current_area,
+                "visible_area": visible_area,
+                "reason": "几乎被上方图层完全遮挡或有效可见面积过小(<8px)"
+            })
             continue
 
         current_color = shape_groups[i].fill_color[:3]
@@ -501,7 +511,16 @@ def prune_shapes_by_rendered_masks(
                 d_e_bg = color_similarity_lab(bg_color, current_color, device)
                 if d_e_bg < delta_e_limit and current_area <= max_bg_remove_area:
                     to_remove.add(i)
-                    # print(f"  [剪枝] 移除 shape #{i} (area={current_area}): 贴底色背景碎屑且 CIELAB DeltaE={d_e_bg:.2f}")
+                    log_msg = f"[阶段4 几何剪枝] 移除 shape #{i} (面积={current_area}): 贴底色背景碎屑且 CIELAB DeltaE={d_e_bg:.2f} < {delta_e_limit:.2f}"
+                    print(f"  {log_msg}")
+                    prune_removal_logs.append({
+                        "stage": "stage4_geometry_pruning",
+                        "shape_id": i,
+                        "parent_id": 0,
+                        "total_area": current_area,
+                        "delta_e": round(float(d_e_bg), 2),
+                        "reason": f"贴底色背景碎屑且 CIELAB DeltaE={d_e_bg:.2f} 同色"
+                    })
                 break
 
             existing_mask = layer_masks.get(j)
@@ -524,7 +543,16 @@ def prune_shapes_by_rendered_masks(
                 # CIELAB 色差低于阈值，判定为计算机视觉同色冗余
                 if d_e < delta_e_limit:
                     to_remove.add(i)
-                    # print(f"  [剪枝] 移除 shape #{i} (area={current_area}): 被直接父级 #{j} 包含且 CIELAB DeltaE={d_e:.2f} < {delta_e_limit:.2f}")
+                    log_msg = f"[阶段4 几何剪枝] 移除 shape #{i} (面积={current_area}): 被直接父级 #{j} 包含且 CIELAB DeltaE={d_e:.2f} < {delta_e_limit:.2f}"
+                    print(f"  {log_msg}")
+                    prune_removal_logs.append({
+                        "stage": "stage4_geometry_pruning",
+                        "shape_id": i,
+                        "parent_id": j,
+                        "total_area": current_area,
+                        "delta_e": round(float(d_e), 2),
+                        "reason": f"被父级 #{j} 包含且 CIELAB DeltaE={d_e:.2f} 同色剪枝"
+                    })
                     break
 
     for idx in sorted(list(to_remove), reverse=True):
@@ -539,7 +567,7 @@ def prune_shapes_by_rendered_masks(
             new_masks[new_i] = layer_masks[old_i]
 
     print(f"共移除 {len(to_remove)} 个 path，剩余 {len(shapes)}")
-    return shapes, shape_groups, new_masks, len(to_remove)
+    return shapes, shape_groups, new_masks, len(to_remove), prune_removal_logs
 
 
 # ==============================================================================
@@ -636,7 +664,7 @@ def svg_optimize(
         index_mask_dict.clear()
         index_mask_dict.update(layer_masks)
 
-        shapes, shape_groups, layer_masks, n_removed = prune_shapes_by_rendered_masks(
+        shapes, shape_groups, layer_masks, n_removed, prune_removal_logs = prune_shapes_by_rendered_masks(
             shapes, shape_groups, layer_masks, device,
             rm_color_threshold=rm_color_threshold,
             inclusion_threshold=prune_inclusion_threshold,
@@ -720,7 +748,7 @@ def svg_optimize(
     print(f"SVG 优化耗时--------------->: {time.time() - st:.2f} s")
     print(f"final MSE (reported): {final_mse:.6f}")
 
-    return svg_path, gif_path, shapes, shape_groups, final_mse, metrics
+    return svg_path, gif_path, shapes, shape_groups, final_mse, metrics, prune_removal_logs
 
 
 # ==============================================================================
@@ -769,7 +797,7 @@ def run_vectorization(
         contour_min_dist=float(pf_cfg.get("contour_min_dist", 0.004)),
     )
 
-    svg_path, gif_path, shapes, shape_groups, final_loss, metrics = svg_optimize(
+    svg_path, gif_path, shapes, shape_groups, final_loss, metrics, prune_logs = svg_optimize(
         shapes=shapes,
         shape_groups=shape_groups,
         target_image=target_rgb,
@@ -807,4 +835,5 @@ def run_vectorization(
         "mse_loss": round(final_loss, 6),
         "time_consuming": round(elapsed, 4),
         "metrics": metrics,
+        "prune_logs": prune_logs,
     }

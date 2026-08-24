@@ -229,6 +229,7 @@ outputs/[图像名]_[随机6位ID]/
 ├── init.svg                          # 初始未优化的全图 SVG
 ├── op_final.svg                      # 主优化完成（剪枝前）SVG
 ├── after_prune.svg                   # CIELAB 立体剪枝后 SVG
+├── decision_log.json                 # 【全流程决策日志】记录图层移除、同色吸收原因与阶段4几何剪枝明细
 └── result.json                       # 本次运行全阶段耗时、点数、损失统计报告
 ```
 

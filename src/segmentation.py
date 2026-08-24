@@ -653,12 +653,23 @@ def perform_fusion_and_save(
     to_remove = set()
 
     # 3.3 检查所有精选候选的直接父级同色从属关系（保留自身纯色和父级纯色判断，全面升级为 CIELAB Delta E 色差）
+    # 【实心几何父级投影】：计算各候选的实心填洞投影 (filled_mask)，确保中空挖孔图层能够准确找到其包围容器，防止被跨层误吸收到背景
     cielab_diff_thresh = float(color_diff_thresh) if color_diff_thresh is not None else 6.0
+    filled_projections = {}
+    for idx, item in enumerate(surviving):
+        if item["source"] == "bg":
+            filled_projections[idx] = item["mask_image"] > 0
+        else:
+            filled_m, _ = _fill_holes(item["mask_image"])
+            filled_projections[idx] = filled_m > 0
+
+    stage3_removal_logs = []
 
     for i in range(n - 1, -1, -1):
         if i in to_remove or surviving[i]["source"] == "bg":
             continue
         cur = surviving[i]
+        cur_name = f"#{i:03d}_{cur['source']}_m{cur.get('orig_idx',0):02d}_a{cur.get('area',0)}"
         # 【自身纯度锁】：自身不纯（如包含多个色块/纹理）则独立保留，绝不被吸收
         if cur.get("homogeneity_std", 0.0) > self_thresh:
             continue
@@ -671,9 +682,11 @@ def perform_fusion_and_save(
             if j in to_remove:
                 continue
             parent = surviving[j]
-            parent_mask = parent["mask_image"] > 0
+            parent_name = f"#{j:03d}_{parent['source']}_m{parent.get('orig_idx',0):02d}_a{parent.get('area',0)}"
+            # 使用父级的实心几何投影判定包围关系，使包围洞口的容器成为真正的第一父级
+            parent_solid_mask = filled_projections[j]
 
-            inter = np.logical_and(cur_mask, parent_mask).sum()
+            inter = np.logical_and(cur_mask, parent_solid_mask).sum()
             inc_ratio = inter / float(cur_area) if cur_area > 0 else 0.0
 
             if inc_ratio >= parent_contain_thresh:
@@ -689,12 +702,23 @@ def perform_fusion_and_save(
 
                 if delta_e < cielab_diff_thresh:
                     to_remove.add(i)
-                    # print(f"  [同色吸收] #{i:03d} -> 被直接父级 #{j:03d} 吸收 (包含 {inc_ratio*100:.1f}%, CIELAB DeltaE={delta_e:.2f} < {cielab_diff_thresh})")
+                    log_msg = f"[Stage 3 同色吸收] {cur_name} 被直接父级 {parent_name} 吸收 (包含率={inc_ratio*100:.1f}%, CIELAB DeltaE={delta_e:.2f} < {cielab_diff_thresh})"
+                    print(f"  {log_msg}")
+                    stage3_removal_logs.append({
+                        "stage": "stage3_color_absorption",
+                        "mask_id": i,
+                        "mask_info": cur_name,
+                        "parent_id": j,
+                        "parent_info": parent_name,
+                        "contain_ratio": round(inc_ratio, 4),
+                        "delta_e": round(delta_e, 2),
+                        "reason": f"被父级以 {inc_ratio*100:.1f}% 包含且 CIELAB DeltaE={delta_e:.2f} 同色吸收"
+                    })
                 break
 
     final_masks = [surviving[idx] for idx in range(n) if idx not in to_remove]
     print(f"  --> [Stage 3] 融合完成！终极保留优质图层: {len(final_masks)} 个")
-    return final_masks
+    return final_masks, stage3_removal_logs
 
 
 # ==============================================================================
@@ -755,7 +779,7 @@ def run_segmentation(
     pure_proposals = process_morphology_keep_holes(image_rgb, raw_proposals, output_path, cfg)
 
     # 2. 阶段 3: 在 100% 真实纯度下执行跨界立体压制与 CIELAB 父子同色吸收
-    fused_masks = perform_fusion_and_save(image_rgb, pure_proposals, output_path, cfg)
+    fused_masks, stage3_removal_logs = perform_fusion_and_save(image_rgb, pure_proposals, output_path, cfg)
 
     # 3. 阶段 3 尾声：对最终精简留存图层执行闭合孔洞填实，并严格按填实后的实心面积从大到小重新排序
     print("  [后置几何实心化 & 面积重排序] 对最终精简图层执行闭合孔洞填实并按实心面积严格降序排列...")
@@ -836,7 +860,7 @@ def run_segmentation(
         json.dump(meta_info, f, ensure_ascii=False, indent=2)
 
     bg_color = tuple(get_canvas_background_color(image_rgb))
-    return pre_paths, bg_color
+    return pre_paths, bg_color, stage3_removal_logs
 
 
 # 保持向后兼容别名
