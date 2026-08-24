@@ -17,12 +17,12 @@ VISTA 的全流水线包含以下解耦的核心阶段：
 
 ```mermaid
 graph LR
-    A[输入图像 / Alpha掩码] --> B[阶段 0: 图像预处理<br/>自适应反差底合成 / 双边保边滤波]
-    B --> C[阶段 1: 混合分割候选<br/>SAM 语义先验 + CIELAB DBSCAN SLIC<br/>(严格保留原生中空拓扑)]
-    C --> D[阶段 2: 中空形态学与单连通拆解<br/>Open-First 智能自适应断桥平滑<br/>(100% 真实纯度采样)]
-    D --> E[阶段 3: 立体融合引擎<br/>SAM 自去重 + 纯度感知压制 SLIC +<br/>CIELAB Delta E 纯度双锁父子同色吸收<br/>(尾声统一闭合孔洞几何填实)]
-    E --> F[阶段 4: 矢量拟合与可微渲染优化<br/>贝塞尔直线混合拟合 + DiffVG 可微优化 +<br/>CIELAB 有效可见像素立体剪枝]
-    F --> G[成果输出<br/>final.svg (自适应透明/实心底) / animation.gif]
+    A["输入图像 / Alpha掩码"] --> B["阶段 0: 图像预处理<br/>自适应反差底合成 / 双边保边滤波"]
+    B --> C["阶段 1: 混合分割候选<br/>SAM 语义先验 + CIELAB DBSCAN SLIC<br/>(严格保留原生中空拓扑)"]
+    C --> D["阶段 2: 中空形态学与单连通拆解<br/>Open-First 智能自适应断桥平滑<br/>(100% 真实纯度采样)"]
+    D --> E["阶段 3: 立体融合引擎<br/>SAM 自去重 + 纯度感知压制 SLIC +<br/>CIELAB Delta E 纯度双锁父子同色吸收<br/>(尾声统一闭合孔洞几何填实)"]
+    E --> F["阶段 4: 矢量拟合与可微渲染优化<br/>贝塞尔直线混合拟合 + DiffVG 可微优化 +<br/>CIELAB 有效可见像素立体剪枝"]
+    F --> G["成果输出<br/>final.svg (自适应透明/实心底) / animation.gif"]
 ```
 
 1. **阶段 0：输入与图像预处理 (`utils.load_and_resize`, `utils.save_target_image`)**
@@ -197,42 +197,38 @@ print(f"总耗时: {summary['total_time_sec']}s, 路径数: {summary['vectorize'
 
 ## 规范化输出目录结构 (Output Directory Structure)
 
-每次运行会在输出根目录下为每张图像生成独立的工作空间目录：
+每次运行会在输出目录下为每张图像生成清晰解耦、分阶段归档的独立工作空间：
 
 ```text
-out/run/[图像名]_[随机6位ID]/
+outputs/[图像名]_[随机6位ID]/
 │
-├── target_img/                       # 阶段 0：预处理后目标图（透明底合成白底/等比缩放）
+├── target_img/                       # 阶段 0：预处理后目标图（透明底合成/等比缩放）
 │
-├── raw_slic_masks/                   # 阶段 1：SLIC 原始黑白二值掩码（严格保留镂空）
-├── raw_slic_colored_masks/           # 阶段 1：SLIC 原始纯色真彩掩码
-├── slic_overview_colored.png         # 阶段 1：SLIC 原始全景预览彩图
+│   # ----------------- 【三大标准阶段掩码与真彩画廊】 -----------------
+├── raw_sam_masks/ & raw_slic_masks/  # 【第 1 阶段：原生分割候选】（严格保留原生中空拓扑）
+│   ├── raw_sam_colored_masks/        # SAM 原生候选真彩掩码
+│   ├── raw_slic_colored_masks/       # SLIC 原生超像素真彩掩码
+│   ├── sam_overview_colored.png      # SAM 原生候选全景预览彩图
+│   └── slic_overview_colored.png     # SLIC 原生候选全景预览彩图
 │
-├── raw_sam_masks/                    # 阶段 1：SAM 原始黑白二值掩码（严格保留镂空）
-├── raw_sam_colored_masks/            # 阶段 1：SAM 原始纯色真彩掩码
-├── sam_overview_colored.png          # 阶段 1：SAM 原始全景预览彩图
+├── origin_masks/                     # 【第 2 阶段：单连通拆解 + 智能断桥平滑】（保持原生中空采样）
+│   ├── origin_colored_masks/         # 拆解后的单连通真彩掩码（文件名反映面积a与纯度s）
+│   └── origin_overview_colored.png   # 连通拆分后全景预览彩图
 │
-├── origin_masks/                     # 阶段 2：孔洞实心填实 + 形态学平滑 + 单连通拆分掩码
-├── origin_colored_masks/             # 阶段 2：拆分后的单连通纯色掩码
-├── origin_overview_colored.png       # 阶段 2：连通拆分后全景预览彩图
+├── pre_masks/                        # 【第 3 阶段：预处理完成终极图层】（纯度融合+尾声填洞实心化）
+│   ├── pre_colored_masks/            # 最终图层真彩掩码（严格按实心面积 solid_area 降序排列）
+│   ├── pre_overview_colored.png      # 最终精简分层全景预览彩图
+│   └── pre_masks_meta.json           # 最终图层元数据 JSON（面积、RGB色值、色彩方差、来源）
 │
-├── nms_masks/                        # 阶段 3.1-3.2：SAM自去重 + 压制SLIC + 压制重复空洞后的掩码
-├── nms_colored_masks/                # 阶段 3.1-3.2：IoU去重后的纯色真彩掩码
-├── nms_overview_colored.png          # 阶段 3.1-3.2：IoU去重后全景预览彩图
-│
-├── pre_masks/                        # 阶段 3.3：纯度感知直接父级同色吸收后的【最终精简图层】
-├── pre_colored_masks/                # 阶段 3.3：最终精简图层的纯色真彩掩码
-├── pre_overview_colored.png          # 阶段 3.3：最终精简图层的全景预览彩图
-├── pre_masks_meta.json               # 最终图层元数据（面积、均值色、色彩方差、来源）
-│
+│   # ----------------- 【阶段 4 矢量化与可微渲染输出】 -----------------
 ├── init_svgs/                        # 阶段 4：各图层单体贝塞尔拟合 SVG 与初始组合 SVG
 ├── optim_svgs/                       # 阶段 4：DiffVG 优化中间迭代过程 SVG (opt_iter_*.svg)
 │
-├── final.svg                         # 最终优化与剪枝后的标准 SVG 矢量成果文件
-├── animation.gif                     # 矢量化动态优化全过程动画
+├── final.svg                         # 最终优化与剪枝后的标准 SVG 矢量成果文件 (自适应透明底/实心底)
+├── animation.gif                     # 矢量化动态优化全过程动画 (GIF)
 ├── init.svg                          # 初始未优化的全图 SVG
 ├── op_final.svg                      # 主优化完成（剪枝前）SVG
-├── after_prune.svg                   # 同色包含图层剪枝后 SVG
+├── after_prune.svg                   # CIELAB 立体剪枝后 SVG
 └── result.json                       # 本次运行全阶段耗时、点数、损失统计报告
 ```
 
