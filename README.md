@@ -13,44 +13,45 @@
 
 ## 核心流程 (Pipeline Workflow)
 
-VISTA 的全流水线包含以下五个解耦的核心阶段：
+VISTA 的全流水线包含以下解耦的核心阶段：
 
 ```mermaid
 graph LR
-    A[输入图像] --> B[阶段 0: 图像预处理<br/>透明度白色底合成 / Lanczos 缩放]
-    B --> C[阶段 1: 混合分割留洞<br/>SAM 语义先验 + SLIC 超像素]
-    C --> D[阶段 2: 预处理与连通拆分<br/>孔洞实心化 + 自适应平滑 + 单连通分解]
-    D --> E[阶段 3: 分层融合引擎<br/>IoU 去重 + 纯度感知直接父级吸收]
-    E --> F[阶段 4: 几何拟合与 DiffVG 优化<br/>贝塞尔直线混合拟合 + 可微优化 + 剪枝]
-    F --> G[成果输出<br/>final.svg / animation.gif]
+    A[输入图像 / Alpha掩码] --> B[阶段 0: 图像预处理<br/>自适应反差底合成 / 双边保边滤波]
+    B --> C[阶段 1: 混合分割候选<br/>SAM 语义先验 + CIELAB DBSCAN SLIC<br/>(严格保留原生中空拓扑)]
+    C --> D[阶段 2: 中空形态学与单连通拆解<br/>Open-First 智能自适应断桥平滑<br/>(100% 真实纯度采样)]
+    D --> E[阶段 3: 立体融合引擎<br/>SAM 自去重 + 纯度感知压制 SLIC +<br/>CIELAB Delta E 纯度双锁父子同色吸收<br/>(尾声统一闭合孔洞几何填实)]
+    E --> F[阶段 4: 矢量拟合与可微渲染优化<br/>贝塞尔直线混合拟合 + DiffVG 可微优化 +<br/>CIELAB 有效可见像素立体剪枝]
+    F --> G[成果输出<br/>final.svg (自适应透明/实心底) / animation.gif]
 ```
 
 1. **阶段 0：输入与图像预处理 (`utils.load_and_resize`, `utils.save_target_image`)**
-   - 自动检测并处理透明通道（RGBA / Palette P 调色板），在白色画布上执行 Alpha 合成，杜绝透明边缘变黑问题；
-   - 依据配置进行等比例高质量缩放（保持宽高比），并提取画布全局中位数背景色。
+   - 自动检测并提取原生 Alpha 透明通道（RGBA / Palette P 调色板），支持自适应反差色底合成与原生前景轮廓注入；
+   - 可选双边保边滤波去噪（Bilateral Filter），消除 JPEG 块效应与细微噪点；
+   - 依据配置进行等比例高质量缩放（保持宽高比），并准确提取画布全局背景色。
 
 2. **阶段 1：原始候选留洞提取 (`segmentation.get_raw_slic_proposals`, `segmentation.get_raw_sam_proposals`)**
-   - **SLIC 路由**：生成细粒度超像素并执行 DBSCAN 色彩聚类，严格保留内部空洞；
-   - **SAM 路由**：利用 `SamAutomaticMaskGenerator` 提取自顶向下的多尺度语义掩码，同样严格保留内部拓扑镂空；
+   - **自适应 SLIC 路由**：根据分辨率自适应网格密度，在 CIELAB 感知均匀色彩空间下执行 DBSCAN 聚类并结合凸缺陷平滑，严格保留内部中空拓扑；
+   - **SAM 路由**：利用 `SamAutomaticMaskGenerator` 提取多尺度语义掩码，同样严格保留内部拓扑镂空；
    - 输出 `raw_slic_masks/` 与 `raw_sam_masks/`。
 
-3. **阶段 2：闭合孔洞实心化、形态学平滑与单连通组件分解 (`segmentation.process_hole_queue_and_morphology`)**
-   - 采用带保护边框的 `_fill_holes` 算法，实心化内部真正封闭的空洞（如甜甜圈、杯把镂空）；
-   - 执行根据区域面积动态调核的自适应形态学平滑（Smart Morphology）消除噪点毛刺；
-   - 拆解为独立的单连通图层（Single Connected Components），输出至 `origin_masks/`。
+3. **阶段 2：原生中空形态学平滑与单连通拆解 (`segmentation.process_morphology_keep_holes`)**
+   - 采用 **Open-First 智能多尺度自适应核算法**：优先通过自适应开运算（MORPH_OPEN）精准切断超像素或聚类微弱粘连桥，再对独立组件内部微小平滑；
+   - 拆解为独立的单连通图层（Single Connected Components），**全程保留原生中空拓扑采样**，确保采集到的色彩标准差（`homogeneity_std`）100% 真实，不受空洞杂色污染；
+   - 输出至 `origin_masks/`。
 
-4. **阶段 3：分层融合与纯度感知直接父级同色吸收 (`segmentation.perform_fusion_and_save`)**
-   - **SAM 内部 NMS 自去重**：抑制 IoU > 0.95 的同源重叠图层；
-   - **SAM 跨界压制 SLIC**：当 SLIC 与 SAM 重叠 IoU > 0.95 时，保留语义更准的 SAM 图层；
-   - **原生掩码压制重复空洞**：空洞与原生掩码 IoU > 0.90 时剔除多余图层；
+4. **阶段 3：立体分层融合与 CIELAB 纯度双锁同色吸收 (`segmentation.perform_fusion_and_save`)**
+   - **SAM 内部高精度自去重**：抑制 IoU > 0.90 的同源重叠图层；
+   - **纯度感知跨界压制 SLIC**：基于 IoU、包含率、色差与 SAM 纯度守门员机制，杜绝 SLIC 在纯色大块内的坑洼碎片冗余；
    - **全局背景层 0 插入**：构建 `000_bg.png` 承接整图底色；
-   - **纯度感知直接父级吸收**：倒序寻找最小“直接包含父级”，当且仅当子层与父层均满足纯色条件（方差 std 低于阈值）且色差低于阈值时才合并吸收，有效保护复杂纹理与主体图层；
-   - 输出至 `pre_masks/` 并保存图层元数据 `pre_masks_meta.json`。
+   - **CIELAB 纯度双锁父子同色吸收**：在人眼感知均匀的 CIELAB $\Delta E$ 色彩空间下执行同色吸收，配合“自身纯度锁 (`self_pure_std_thresh`)”与“父级纯度锁 (`parent_pure_std_thresh`)”，既保证同色冗余干净吸收，又杜绝误杀复合容器内的独立细节；
+   - **后置孔洞填实 (Late Hole-Filling)**：在融合筛选定型后，对最终存活图层统一调用 `_fill_holes` 闭合填实，输出至 `pre_masks/`，为阶段 4 贝塞尔拟合提供闭合实心几何底盘。
 
-5. **阶段 4：直接矢量化与 DiffVG 可微渲染优化 (`vectorize.generate_init_svg`, `vectorize.svg_optimize`)**
+5. **阶段 4：直接矢量化、DiffVG 可微渲染优化与立体剪枝 (`vectorize.generate_init_svg`, `vectorize.svg_optimize`)**
    - **混合几何拟合**：以最少的三阶贝塞尔曲线和直线段贪婪拟合轮廓；
    - **主优化**：基于 DiffVG 可微渲染器与 Adam 优化器，联合优化控制点坐标与填充颜色，引入共线平滑（Collinear Handle Loss）与自相交惩罚；
-   - **几何剪枝与短精修**：重新光栅化优化后的几何图层，剔除被包含且同色的冗余图层，随后执行短轮次精修（Refine），输出 `final.svg` 与 `animation.gif`。
+   - **CIELAB 感知立体剪枝与短精修**：重新光栅化优化后的几何图层，基于 CIELAB $\Delta E$ 感知色差、自底向上图层遮挡有效可见像素分析（Visible Pixel Map），彻底清除贴边同色碎屑，随后执行短轮次精修（Refine）；
+   - **自适应背景导出**：原图透明则自动导出天然无背景的纯净 SVG，原图有底色则完整保留背景底盘。
 
 ---
 
@@ -87,7 +88,6 @@ conda install -y "mkl=2023.1" "intel-openmp=2023.1"
 conda install -y numpy scikit-image
 # diffvg build dependencies
 conda install -y -c conda-forge "cmake=3.27"
-conda install -y -c nvidia "cuda-nvcc=11.7"
 conda install -y -c conda-forge ffmpeg
 # Python dependencies
 pip install svgwrite svgpathtools cssutils numba torch-tools visdom
