@@ -653,15 +653,20 @@ def perform_fusion_and_save(
         _save_overview_colored(surviving, output_sub_dir / "nms_overview_colored.png", (h, w), 0)
         print(f"  --> [Stage 3.1 & 3.2] 完成！IoU去重后留存 {len(surviving)} 个掩码已保存在: {nms_dir}")
 
-    # 3.3 检查精选候选的直接父级同色从属关系
+    # 3.3 检查所有精选候选的直接父级同色从属关系（保留自身纯色和父级纯色判断，全面升级为 CIELAB Delta E 色差）
+    # 默认 color_diff_thresh = 6.0 对应 CIELAB Delta E 约为 6.0 (标准同色系无感容差)
+    cielab_diff_thresh = float(color_diff_thresh) if color_diff_thresh is not None else 6.0
+
     for i in range(n - 1, -1, -1):
         if i in to_remove or surviving[i]["source"] == "bg":
             continue
         cur = surviving[i]
+        # 【自身纯度锁】：自身不纯（如包含多个色块/纹理）则独立保留，绝不被吸收
         if cur.get("homogeneity_std", 0.0) > self_thresh:
             continue
         cur_mask = cur["mask_image"] > 0
-        cur_color = np.array(cur["fill_color"], dtype=float)
+        cur_color_u8 = np.clip(np.array(cur["fill_color"], dtype=float), 0, 255).astype(np.uint8).reshape(1, 1, 3)
+        cur_lab = cv2.cvtColor(cur_color_u8, cv2.COLOR_RGB2LAB).astype(float)[0, 0]
         cur_area = cur["area"]
 
         for j in range(i - 1, -1, -1):
@@ -674,15 +679,19 @@ def perform_fusion_and_save(
             inc_ratio = inter / float(cur_area) if cur_area > 0 else 0.0
 
             if inc_ratio >= parent_contain_thresh:
+                # 【父级纯度锁】：父级如果不是纯色（包含多物体/杂色容器），停止向该父级吸收，防止误杀
                 if parent.get("homogeneity_std", 0.0) > parent_thresh:
                     break
 
-                parent_color = np.array(parent["fill_color"], dtype=float)
-                color_diff = np.linalg.norm(cur_color - parent_color)
+                parent_color_u8 = np.clip(np.array(parent["fill_color"], dtype=float), 0, 255).astype(np.uint8).reshape(1, 1, 3)
+                parent_lab = cv2.cvtColor(parent_color_u8, cv2.COLOR_RGB2LAB).astype(float)[0, 0]
 
-                if color_diff < color_diff_thresh:
+                # 高精度 CIELAB 感知色差
+                delta_e = float(np.linalg.norm(cur_lab - parent_lab))
+
+                if delta_e < cielab_diff_thresh:
                     to_remove.add(i)
-                    # print(f"  [同色吸收] #{i:03d} -> 被直接父级 #{j:03d} 吸收 (包含 {inc_ratio*100:.1f}%, 色差={color_diff:.1f})")
+                    # print(f"  [同色吸收] #{i:03d} -> 被直接父级 #{j:03d} 吸收 (包含 {inc_ratio*100:.1f}%, CIELAB DeltaE={delta_e:.2f} < {cielab_diff_thresh})")
                 break
 
     final_masks = [surviving[idx] for idx in range(n) if idx not in to_remove]
@@ -811,54 +820,20 @@ def run_segmentation(
     alpha_mask: Optional[np.ndarray] = None,
 ) -> Tuple[List[str], Tuple[int, int, int]]:
     """
-    【原版默认分割流水线】：在阶段 2 进行闭合孔洞填实与单连通拆解。
-    返回：(pre_mask_paths 掩码路径列表, bg_color 画布背景色)
+    【VISTA 标准分割流水线 - 后置填洞方案】：
+    阶段 1：SLIC 自适应超像素 + SAM 语义候选提取 (保持中空拓扑)；
+    阶段 2：形态学平滑 + 单连通拆解 (保持中空真实采样，确保色彩方差 100% 真实)；
+    阶段 3：跨算法立体压制 (SAM 自去重、SAM 压制 SLIC、基于 CIELAB Delta E 与纯度感知的父子同色吸收)；
+    阶段 3 尾声：统一执行闭合孔洞几何填实 (为阶段 4 贝塞尔闭合轮廓提供实心几何底盘)。
     """
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-
-    use_sam = bool(cfg.get("use_sam", cfg.get("sam", {}).get("enabled", True)))
-    use_slic = bool(cfg.get("use_slic", cfg.get("slic", {}).get("enabled", True)))
-    use_alpha_mask = bool(cfg.get("use_alpha_mask", cfg.get("preprocess", {}).get("use_alpha_mask", True)))
-
-    raw_proposals = []
-
-    if use_alpha_mask and alpha_mask is not None:
-        fg_area = int(np.sum(alpha_mask > 127))
-        h, w = image_rgb.shape[:2]
-        if 0 < fg_area < h * w:
-            alpha_item = {
-                "source": "alpha",
-                "orig_idx": 0,
-                "depth": 0,
-                "cc_idx": 0,
-                "area": fg_area,
-                "mask_image": alpha_mask.copy(),
-                "fill_color": list(get_canvas_background_color(image_rgb)),
-                "orig_sort_idx": 0,
-                "homogeneity_std": 0.0,
-            }
-            raw_proposals.append(alpha_item)
-
-    if use_slic:
-        slic_props = get_raw_slic_proposals(image_rgb, output_path, cfg)
-        raw_proposals.extend(slic_props)
-
-    if use_sam:
-        sam_props = get_raw_sam_proposals(image_rgb, output_path, cfg, preloaded_model=preloaded_model, device=device)
-        raw_proposals.extend(sam_props)
-
-    solid_proposals = process_hole_queue_and_morphology(image_rgb, raw_proposals, output_path, cfg)
-    final_masks = perform_fusion_and_save(image_rgb, solid_proposals, output_path, cfg)
-
-    pre_dir = output_path / "pre_masks"
-    pre_paths = []
-    for item in sorted(pre_dir.glob("*.png")):
-        if item.name != "000_bg.png" and not item.name.endswith("_debug.png"):
-            pre_paths.append(str(item))
-
-    bg_color = tuple(get_canvas_background_color(image_rgb))
-    return pre_paths, bg_color
+    return run_segmentation_late_fill(
+        image_rgb=image_rgb,
+        output_dir=output_dir,
+        cfg=cfg,
+        preloaded_model=preloaded_model,
+        device=device,
+        alpha_mask=alpha_mask,
+    )
 
 
 def run_segmentation_late_fill(
