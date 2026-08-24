@@ -199,34 +199,106 @@ def _save_overview_colored(
 # 第一阶段：原始候选提取（SAM + SLIC）
 # ==============================================================================
 
+def _close_contour_defects(mask_u8: np.ndarray, max_defect_depth: float = 25.0) -> np.ndarray:
+    """
+    边缘多边形大坑/深凹槽几何平滑修复：
+    利用轮廓凸包缺陷 (Convexity Defects) 找出由于超像素缺失造成的非自然锐角大坑并连接填平。
+    """
+    h, w = mask_u8.shape[:2]
+    contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    fixed_mask = mask_u8.copy()
+
+    for cnt in contours:
+        if len(cnt) < 5 or cv2.contourArea(cnt) < 200:
+            continue
+        hull = cv2.convexHull(cnt, returnPoints=False)
+        if hull is None or len(hull) < 3:
+            continue
+        try:
+            defects = cv2.convexityDefects(cnt, hull)
+            if defects is None:
+                continue
+            for i in range(defects.shape[0]):
+                s, e, f, d = defects[i, 0]
+                depth = d / 256.0  # 真实物理像素深度
+                # 如果是狭长且具有一定深度的多边形掉块缺口（典型超像素掉块）
+                if 4.0 <= depth <= max_defect_depth:
+                    start = tuple(cnt[s][0])
+                    end = tuple(cnt[e][0])
+                    far = tuple(cnt[f][0])
+                    # 计算开口跨度
+                    span = np.linalg.norm(np.array(start) - np.array(end))
+                    if span < depth * 3.5:  # 具有坑洞形态特征
+                        pts = np.array([start, far, end], dtype=np.int32)
+                        cv2.fillPoly(fixed_mask, [pts], 255)
+        except Exception:
+            pass
+
+    return fixed_mask
+
+
 def get_raw_slic_proposals(
     image_rgb: np.ndarray,
     output_sub_dir: Optional[Path],
     cfg: Dict[str, Any],
 ) -> List[Dict[str, Any]]:
-    """提取 SLIC 超像素候选并结合 DBSCAN 色彩聚类（严格保留内部空洞）。"""
-    n_segments = int(cfg.get("slic_n_segments", cfg.get("slic", {}).get("n_segments", 2000)))
-    compactness = float(cfg.get("slic_compactness", cfg.get("slic", {}).get("compactness", 5.0)))
-    dbscan_eps = float(cfg.get("dbscan_eps", cfg.get("slic", {}).get("dbscan_eps", 5.0)))
+    """
+    提取 SLIC 超像素候选：
+    1. 依据图像分辨率自适应计算超像素密度（保持单个网格物理尺寸在合适范围）；
+    2. 使用 CIELAB 均匀感知色彩空间进行 DBSCAN 聚类；
+    3. 结合超像素级大坑几何修复与自适应闭运算填平边缘缝隙。
+    """
+    h, w = image_rgb.shape[:2]
+    slic_cfg = cfg.get("slic", {})
+    cell_size = float(slic_cfg.get("cell_size", 14.0))
+    min_segments = int(slic_cfg.get("min_segments", 800))
+    max_segments = int(slic_cfg.get("max_segments", 8000))
+
+    if cell_size > 0:
+        auto_segments = int((h * w) / (cell_size ** 2))
+        n_segments = int(np.clip(auto_segments, min_segments, max_segments))
+    else:
+        n_segments = int(cfg.get("slic_n_segments", slic_cfg.get("n_segments", 2000)))
+
+    compactness = float(cfg.get("slic_compactness", slic_cfg.get("compactness", 15.0)))
+    dbscan_eps = float(cfg.get("dbscan_eps", slic_cfg.get("dbscan_eps", 6.0)))
+    use_lab = bool(slic_cfg.get("use_lab", True))
+    enforce_conn = bool(slic_cfg.get("enforce_connectivity", True))
     min_area = cfg.get("min_area", cfg.get("preprocess", {}).get("min_area", 0.00015))
     save_raw_masks = bool(cfg.get("save_raw_masks", cfg.get("save_options", {}).get("save_raw_masks", True)))
     save_color_mask = bool(cfg.get("save_color_mask", cfg.get("save_options", {}).get("save_color_mask", True)))
 
-    print(f"[Stage 1 - SLIC] 运行 SLIC (n={n_segments}, compactness={compactness})...")
-    h, w = image_rgb.shape[:2]
+    print(f"[Stage 1 - SLIC] 自适应分辨率 SLIC (分辨率={w}x{h}, n_segments={n_segments}, compactness={compactness})...")
+    
+    # 转换为 CIELAB 空间以获得符合人类视觉一致性的色彩感知距离
+    if use_lab:
+        img_for_slic = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2LAB)
+    else:
+        img_for_slic = image_rgb
+
     segments = segmentation.slic(
-        image_rgb, n_segments=n_segments, compactness=compactness, start_label=1
+        img_for_slic,
+        n_segments=n_segments,
+        compactness=compactness,
+        start_label=1,
+        enforce_connectivity=enforce_conn,
     )
     labels = np.unique(segments)
-    avg_colors = np.array([image_rgb[segments == label].mean(axis=0) for label in labels])
+    
+    # 在 LAB 色彩空间下计算各超像素块均值并进行 DBSCAN 聚类
+    avg_colors_lab = np.array([img_for_slic[segments == label].mean(axis=0) for label in labels])
 
-    print(f"[Stage 1 - SLIC] DBSCAN 聚类 (eps={dbscan_eps})...")
-    db = DBSCAN(eps=dbscan_eps, min_samples=1).fit(avg_colors)
+    print(f"[Stage 1 - SLIC] CIELAB DBSCAN 聚类 (eps={dbscan_eps})...")
+    db = DBSCAN(eps=dbscan_eps, min_samples=1).fit(avg_colors_lab)
     cluster_labels = db.labels_
     unique_clusters = np.unique(cluster_labels)
 
     proposals = []
     min_area_px = resolve_min_area(min_area, h * w)
+
+    # 依据分辨率动态计算闭运算填坑核大小 (例如 512 分辨率下为 3，2000 分辨率下为 7)
+    k_close = max(3, int(max(h, w) / 300) | 1)
+    kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_close, k_close))
 
     for cluster_id in unique_clusters:
         if cluster_id == -1:
@@ -235,6 +307,12 @@ def get_raw_slic_proposals(
         for i, label_val in enumerate(labels):
             if cluster_labels[i] == cluster_id:
                 mask[segments == label_val] = 255
+
+        # 1. 形态学闭运算：填平超像素网格拼合带来的毛刺和微小缝隙
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_close)
+
+        # 2. 几何凹陷修复：填平多边形超像素掉块产生的大坑
+        mask = _close_contour_defects(mask, max_defect_depth=max(15.0, cell_size * 1.5))
 
         area = int((mask > 0).sum())
         if area >= min_area_px:
@@ -464,7 +542,7 @@ def perform_fusion_and_save(
     sam_list = [c for c in candidates if c["source"] == "sam"]
     slic_list = [c for c in candidates if c["source"] == "slic"]
 
-    # 3.1 & 3.2 SAM 自去重与对 SLIC 的压制
+    # 3.1 & 3.2 SAM 自去重与纯度感知跨界压制 SLIC
     kept_sam = []
     for s_item in sorted(sam_list, key=lambda x: x["area"], reverse=True):
         is_dup = False
@@ -472,20 +550,49 @@ def perform_fusion_and_save(
             iou = _compute_iou(s_item["mask_image"], k_item["mask_image"])
             if iou > iou_sam_internal_thresh:
                 is_dup = True
-                # print(f"  [SAM内部去重] original #{s_item.get('orig_sort_idx', 0):03d} 与 #{k_item.get('orig_sort_idx', 0):03d} IoU={iou:.3f} -> 移除重复项")
                 break
         if not is_dup:
             kept_sam.append(s_item)
 
     kept_slic = []
+    # 纯度保护阈值：SAM 的色彩方差低于此值说明是纯色图层，允许压制；若高于此值说明是复合容器，严禁压制内部 SLIC 细节
+    sam_pure_suppress_std = float(cfg.get("sam_pure_suppress_std", cfg.get("preprocess", {}).get("sam_pure_suppress_std", 10.0)))
+    slic_contain_suppress_thresh = float(cfg.get("slic_contain_suppress_thresh", cfg.get("preprocess", {}).get("slic_contain_suppress_thresh", 0.85)))
+
     for sl_item in sorted(slic_list, key=lambda x: x["area"], reverse=True):
         suppressed = False
+        sl_mask = sl_item["mask_image"]
+        sl_area = float(sl_item["area"])
+        sl_col = np.array(sl_item["fill_color"], dtype=float)
+
         for k_sam in kept_sam:
-            iou = _compute_iou(sl_item["mask_image"], k_sam["mask_image"])
-            if iou > iou_sam_slic_thresh:
+            sam_std = k_sam.get("homogeneity_std", 0.0)
+            sam_mask = k_sam["mask_image"]
+            sam_area = float(k_sam["area"])
+
+            inter = np.logical_and(sl_mask > 0, sam_mask > 0).sum()
+            if inter == 0:
+                continue
+
+            union = sl_area + sam_area - inter
+            iou = inter / float(union) if union > 0 else 0.0
+            contain_ratio = inter / sl_area if sl_area > 0 else 0.0
+
+            sam_col = np.array(k_sam["fill_color"], dtype=float)
+            c_diff = np.linalg.norm(sl_col - sam_col)
+
+            # 【纯度感知立体压制规则】：
+            # 条件 1：高对称 IoU 重合 (>=0.85)，且 SAM 本身是纯色（不是多色容器） -> SAM 取代 SLIC
+            if iou >= iou_sam_slic_thresh and sam_std <= sam_pure_suppress_std:
                 suppressed = True
-                # print(f"  [跨界压制] original #{sl_item.get('orig_sort_idx', 0):03d} 与 #{k_sam.get('orig_sort_idx', 0):03d} IoU={iou:.3f} -> SAM压制SLIC")
                 break
+
+            # 条件 2：包含度极高 (SLIC 85% 以上都在 SAM 内部) 且两者颜色极其接近 (色差 < 10) 且 SAM 纯净
+            # 说明 SLIC 只是 SAM 大纯色块内因超像素聚类分裂出的多边形残片/坑洼副本 -> 坚决压制
+            if contain_ratio >= slic_contain_suppress_thresh and c_diff < color_diff_thresh * 2.0 and sam_std <= sam_pure_suppress_std:
+                suppressed = True
+                break
+
         if not suppressed:
             kept_slic.append(sl_item)
 

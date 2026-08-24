@@ -42,9 +42,21 @@ sam:
 
 slic:
   enabled: true
+  # 单个超像素期望物理边长（像素），>0 时自动根据图像分辨率计算超像素数：
+  # n_segments = clip((H*W)/(cell_size^2), min_segments, max_segments)
+  cell_size: 14.0
+  min_segments: 800
+  max_segments: 8000
+  # 固定超像素数（仅当 cell_size <= 0 时生效）
   n_segments: 2000
-  compactness: 5.0
-  dbscan_eps: 5.0
+  # 紧凑度（推荐 15.0，使超像素形状规整，避免细长多边形锯齿）
+  compactness: 15.0
+  # CIELAB 色彩空间下的 DBSCAN 聚类阈值
+  dbscan_eps: 6.0
+  # 是否在 CIELAB 感知均匀空间下计算色差
+  use_lab: true
+  # 是否强制超像素空间连通性
+  enforce_connectivity: true
 
 # -----------------------------------------------------------------------------
 # 掩码预处理与分层融合（孔洞提取、连通域拆分、纯度感知直接父级同色吸收）
@@ -53,7 +65,7 @@ preprocess:
   # 图像预处理尺寸（0 表示保持原始分辨率，>0 表示缩放到指定最长边）
   target_size: 0
   # 是否开启轻量保边去噪滤波 (Bilateral Filter)，抑制 JPEG 噪点块
-  denoise: true
+  denoise: false
   # 双边滤波色彩方差与空间方差
   denoise_sigma_color: 35.0
   denoise_sigma_space: 35.0
@@ -62,13 +74,17 @@ preprocess:
   # 是否将 RGBA 提取的原生 Alpha 前景轮廓作为高优先级候选图层
   use_alpha_mask: true
   # 导出最终 SVG 时是否去除全屏底色矩形，保留天然透明底
-  transparent_svg: true
+  transparent_svg: false
   # 最小有效掩码面积比例（若 >= 1 则为绝对像素数）
   min_area: 0.00015
-  # SAM 压制重叠 SLIC 候选的 IoU 阈值
-  iou_sam_slic_thresh: 0.9
+  # SAM 压制重叠 SLIC 候选的 IoU 阈值（推荐 0.85）
+  iou_sam_slic_thresh: 0.85
   # SAM 内部自去重的 IoU 阈值
-  iou_threshold: 0.9
+  iou_threshold: 0.90
+  # SAM 纯色压制保护阈值（低于此方差的 SAM 才能压制 SLIC，高于此方差说明是复合容器不予压制）
+  sam_pure_suppress_std: 10.0
+  # SLIC 单向被 SAM 包含率压制阈值（SLIC > 85% 都在同色 SAM 内部时自动剔除）
+  slic_contain_suppress_thresh: 0.85
   # 判定直接父级包含关系的面积包含率阈值
   inclusion_threshold: 0.90
   # 自身颜色方差保护阈值（高于此方差判定为不纯/纹理大块，跳过被吸收）
