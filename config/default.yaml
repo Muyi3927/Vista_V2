@@ -19,9 +19,9 @@ run:
 
 paths:
   # 输入图像文件或包含图像的目录路径
-  input: /home/jh/research/projects/VISTA/dataset/pairs_50/tmp
+  input: /home/jh/research/projects/VISTA_dev/Vista_V2/dataset/complex_7.png
   # 矢量化结果（SVG/GIF/JSON）输出根目录
-  output: outputs/pairs_50_2
+  output: outputs/test
   # SAM 语义分割模型权重路径
   sam_checkpoint: checkpoints/sam_vit_h_4b8939.pth
 
@@ -149,6 +149,8 @@ prune:
   refine_iters: 100
   # 几何光栅化二值化阈值
   raster_threshold: 0.5
+  # 最低有效透明度阈值（低于此值的幽灵图层在剪枝前优先剔除）
+  min_alpha_threshold: 0.05
 
 # -----------------------------------------------------------------------------
 # 中间过程输出与可视化结果保存开关（三大核心阶段掩码目录：raw -> origin -> pre）

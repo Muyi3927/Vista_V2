@@ -423,17 +423,36 @@ def prune_shapes_by_rendered_masks(
     device: torch.device,
     rm_color_threshold: float = 0.04,
     inclusion_threshold: float = 0.8,
-) -> Tuple[List[pydiffvg.Path], List[pydiffvg.ShapeGroup], Dict[int, np.ndarray], int]:
+    min_alpha_threshold: float = 0.05,
+) -> Tuple[List[pydiffvg.Path], List[pydiffvg.ShapeGroup], Dict[int, np.ndarray], int, List[Dict[str, Any]]]:
     """
     【高精度三维立体剪枝】：
     结合：
+    0. 【低透明度优先清理】：在几何与色彩剪枝前，优先剔除几乎完全透明的幽灵 shape (alpha < min_alpha_threshold)；
     1. CIELAB 感知色差 Delta E (彻底消除 RGB 欧氏距离在蓝绿色系的感知盲区)；
     2. 光栅化遮挡后「有效可见像素 (Visible Pixels)」分析；
     3. 同色包含与贴边冗余碎屑清理。
     """
     to_remove = set()
     n = len(shape_groups)
-    print("移除多余 path（基于 CIELAB 感知色彩冗余、有效可见像素与光栅化几何）...")
+    prune_removal_logs = []
+    print("移除多余 path（基于透明度过滤、CIELAB 感知色彩冗余、有效可见像素与光栅化几何）...")
+
+    # 0. 优先扫描并剔除透明度过低的 shape (幽灵图层)
+    for i in range(1, n):
+        fill_col = shape_groups[i].fill_color
+        if fill_col is not None and len(fill_col) >= 4:
+            alpha_val = float(fill_col[3].item() if hasattr(fill_col[3], 'item') else fill_col[3])
+            if alpha_val < min_alpha_threshold:
+                to_remove.add(i)
+                log_msg = f"[阶段4 几何剪枝] 移除 shape #{i} (透明度 Alpha={alpha_val:.4f} < {min_alpha_threshold:.2f}): 透明度过低"
+                print(f"  {log_msg}")
+                prune_removal_logs.append({
+                    "stage": "stage4_geometry_pruning",
+                    "shape_id": i,
+                    "alpha": round(alpha_val, 4),
+                    "reason": f"透明度 Alpha={alpha_val:.4f} 低于阈值 {min_alpha_threshold:.2f} (幽灵图层)"
+                })
 
     # CIELAB Delta E 阈值换算：rm_color_threshold 0.04 对应 Delta E 约为 8.0~10.0
     base_delta_e = float(rm_color_threshold) * 200.0 if rm_color_threshold is not None else 8.0
@@ -449,11 +468,14 @@ def prune_shapes_by_rendered_masks(
     max_bg_remove_area = total_area * 0.005
 
     # 1. 计算每个图层在自底向上堆叠渲染后，真正暴露在最终画面上的「有效可见像素图」
-    # 按照从顶到底的遮挡累积
+    # 按照从顶到底的遮挡累积（跳过已标记为低透明度移除的图层）
     occlusion_map = np.zeros((canvas_h, canvas_w), dtype=bool)
     visible_pixel_counts = {}
 
     for i in range(n - 1, -1, -1):
+        if i in to_remove:
+            visible_pixel_counts[i] = 0
+            continue
         m = layer_masks.get(i)
         if m is None:
             visible_pixel_counts[i] = 0
@@ -464,8 +486,6 @@ def prune_shapes_by_rendered_masks(
         visible_pixel_counts[i] = int(np.sum(visible_mask))
         # 累积自己的遮挡给下方的图层
         occlusion_map = np.logical_or(occlusion_map, m_bool)
-
-    prune_removal_logs = []
 
     # 2. 自顶向下进行三维判定
     for i in range(n - 1, 0, -1):
@@ -599,8 +619,9 @@ def svg_optimize(
     prune_inclusion_threshold: float = 0.8,
     refine_iters: int = 80,
     raster_threshold: float = 0.5,
+    min_alpha_threshold: float = 0.05,
     transparent_svg: bool = False,
-) -> Tuple[str, str, List[pydiffvg.Path], List[pydiffvg.ShapeGroup], float, List[Dict[str, Any]]]:
+) -> Tuple[str, str, List[pydiffvg.Path], List[pydiffvg.ShapeGroup], float, List[Dict[str, Any]], List[Dict[str, Any]]]:
     """主优化 -> 几何光栅化剪枝 -> 短迭代精修。"""
     st = time.time()
     print("开始 SVG 优化...")
@@ -668,6 +689,7 @@ def svg_optimize(
             shapes, shape_groups, layer_masks, device,
             rm_color_threshold=rm_color_threshold,
             inclusion_threshold=prune_inclusion_threshold,
+            min_alpha_threshold=min_alpha_threshold,
         )
         index_mask_dict.clear()
         index_mask_dict.update(layer_masks)
@@ -822,6 +844,7 @@ def run_vectorization(
         prune_inclusion_threshold=float(prune_cfg.get("inclusion_threshold", 0.8)),
         refine_iters=int(prune_cfg.get("refine_iters", 80)),
         raster_threshold=float(prune_cfg.get("raster_threshold", 0.5)),
+        min_alpha_threshold=float(prune_cfg.get("min_alpha_threshold", 0.05)),
         transparent_svg=bool(cfg.get("transparent_svg", cfg.get("preprocess", {}).get("transparent_svg", False))),
     )
     elapsed = time.time() - st
