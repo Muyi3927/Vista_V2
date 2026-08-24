@@ -113,28 +113,77 @@ def _fill_holes(mask_u8: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     return filled, holes
 
 
-def _smart_morphology_preprocess(region_u8: np.ndarray, orig_area: int) -> Tuple[np.ndarray, int]:
-    """自适应形态学平滑：根据区域面积动态选择核大小去毛刺，保护微小细节。"""
-    if orig_area <= 150:
+def _smart_morphology_preprocess(
+    region_u8: np.ndarray,
+    orig_area: int,
+    image_shape: Optional[Tuple[int, int]] = None,
+) -> Tuple[np.ndarray, int]:
+    """
+    智能自适应形态学预处理引擎：
+    1. 根据全图分辨率与图层等效特征尺度自适应计算开运算 (MORPH_OPEN) 与闭运算 (MORPH_CLOSE) 核大小；
+    2. 【先开后闭 (Open-First)】策略：先通过开运算精准切断像素级脆弱假连通细桥 (Neck Bottleneck)；
+    3. 后续通过小核平滑边缘毛刺与锯齿，确保单连通组件拆解干净彻底。
+    """
+    if orig_area <= 80:
         return region_u8, 0
-    elif orig_area < 500:
-        k_size = 3
-    elif orig_area < 5000:
-        k_size = 5
-    elif orig_area < 25000:
-        k_size = 7
-    else:
-        k_size = 9
 
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_size, k_size))
-    smoothed = cv2.morphologyEx(region_u8, cv2.MORPH_CLOSE, kernel)
-    smoothed = cv2.morphologyEx(smoothed, cv2.MORPH_OPEN, kernel)
-    smoothed = cv2.GaussianBlur(smoothed, (k_size, k_size), 0)
-    _, smoothed = cv2.threshold(smoothed, 127, 255, cv2.THRESH_BINARY)
+    # 获取图像基准尺度
+    if image_shape is not None:
+        h, w = image_shape[:2]
+        diag = np.sqrt(h * w)
+        scale_factor = max(diag / 1024.0, 0.5)
+    else:
+        scale_factor = 1.0
+
+    # 根据图层等效半径及全图缩放比例智能计算开运算核 (k_open) 与闭运算核 (k_close)
+    equiv_radius = np.sqrt(orig_area / np.pi)
+
+    if orig_area < 500:
+        k_open = int(np.clip(round(3 * scale_factor), 3, 5))
+        k_close = 3
+    elif orig_area < 5000:
+        # 对应典型细颈连通块 (如 goblin 中的细颈桥接)，开运算核设定为 5~7 确保切断伪连接
+        k_open = int(np.clip(round(5 * scale_factor), 5, 7))
+        k_close = 3
+    elif orig_area < 30000:
+        k_open = int(np.clip(round(7 * scale_factor), 5, 9))
+        k_close = 5
+    else:
+        k_open = int(np.clip(round(9 * scale_factor), 7, 13))
+        k_close = 5
+
+    # 强制核为奇数
+    if k_open % 2 == 0:
+        k_open += 1
+    if k_close % 2 == 0:
+        k_close += 1
+
+    # 1. 智能开运算 (MORPH_OPEN)：切断超像素或聚类残留的微弱伪粘连桥
+    kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_open, k_open))
+    opened = cv2.morphologyEx(region_u8, cv2.MORPH_OPEN, kernel_open)
+
+    # 2. 如果开运算成功将图层拆解为了多个独立单连通组件，则分别对各组件内部做微小平滑，绝不再全局闭合桥接！
+    num_cc, labels = cv2.connectedComponents(opened)
+    if num_cc > 2:
+        reconstructed = np.zeros_like(region_u8)
+        k_sub = max(3, k_close)
+        sub_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_sub, k_sub))
+        for c_id in range(1, num_cc):
+            sub_m = (labels == c_id).astype(np.uint8) * 255
+            if (sub_m > 0).sum() > 20:
+                sub_smooth = cv2.morphologyEx(sub_m, cv2.MORPH_CLOSE, sub_kernel)
+                reconstructed = cv2.bitwise_or(reconstructed, sub_smooth)
+        smoothed = reconstructed
+    else:
+        # 单块时执行标准轻量平滑
+        kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_close, k_close))
+        closed = cv2.morphologyEx(opened, cv2.MORPH_CLOSE, kernel_close)
+        smoothed = cv2.GaussianBlur(closed, (k_close, k_close), 0)
+        _, smoothed = cv2.threshold(smoothed, 127, 255, cv2.THRESH_BINARY)
 
     if int((smoothed > 0).sum()) <= 20:
         return region_u8, 0
-    return smoothed, k_size
+    return smoothed, k_open
 
 
 def _save_mask_item(
@@ -449,8 +498,8 @@ def process_morphology_keep_holes(
 
     for idx, p in enumerate(raw_proposals):
         raw_mask = p["mask_image"]
-        # 直接对原始带洞 Mask 进行形态学平滑
-        smoothed_m, _ = _smart_morphology_preprocess(raw_mask, orig_area=int((raw_mask > 0).sum()))
+        # 直接对原始带洞 Mask 进行自适应形态学断桥与平滑
+        smoothed_m, _ = _smart_morphology_preprocess(raw_mask, orig_area=int((raw_mask > 0).sum()), image_shape=(h, w))
         num_labels, labels = cv2.connectedComponents(smoothed_m)
 
         for comp_id in range(1, num_labels):
