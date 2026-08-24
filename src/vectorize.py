@@ -22,6 +22,7 @@ import torch
 from utils import (
     collinear_handle_loss,
     color_similarity,
+    color_similarity_lab,
     compute_path_point_nums,
     is_mask_included,
     mask_edge_color_Kmeans,
@@ -420,27 +421,51 @@ def prune_shapes_by_rendered_masks(
     shape_groups: List[pydiffvg.ShapeGroup],
     layer_masks: Dict[int, np.ndarray],
     device: torch.device,
-    rm_color_threshold: float = 0.01,
+    rm_color_threshold: float = 0.04,
     inclusion_threshold: float = 0.8,
 ) -> Tuple[List[pydiffvg.Path], List[pydiffvg.ShapeGroup], Dict[int, np.ndarray], int]:
     """
-    用当前渲染 mask 做层级剪枝。返回 (shapes, shape_groups, layer_masks, n_removed)。
-    背景层 index 0 永不删除。
+    【高精度三维立体剪枝】：
+    结合：
+    1. CIELAB 感知色差 Delta E (彻底消除 RGB 欧氏距离在蓝绿色系的感知盲区)；
+    2. 光栅化遮挡后「有效可见像素 (Visible Pixels)」分析；
+    3. 同色包含与贴边冗余碎屑清理。
     """
     to_remove = set()
     n = len(shape_groups)
-    print("移除多余 path（基于优化后 rasterize mask 与颜色相似度）...")
+    print("移除多余 path（基于 CIELAB 感知色彩冗余、有效可见像素与光栅化几何）...")
 
-    base_color_thresh = float(rm_color_threshold) if (rm_color_threshold is not None and rm_color_threshold > 0) else 0.02
-    effective_inclusion = float(inclusion_threshold) if inclusion_threshold is not None else 0.80
+    # CIELAB Delta E 阈值换算：rm_color_threshold 0.04 对应 Delta E 约为 8.0~10.0
+    base_delta_e = float(rm_color_threshold) * 200.0 if rm_color_threshold is not None else 8.0
+    effective_inclusion = float(inclusion_threshold) if inclusion_threshold is not None else 0.75
 
     total_area = 512 * 512
+    canvas_h, canvas_w = 512, 512
     for m in layer_masks.values():
         if m is not None and hasattr(m, "shape") and len(m.shape) >= 2:
-            total_area = int(m.shape[0] * m.shape[1])
+            canvas_h, canvas_w = m.shape[:2]
+            total_area = int(canvas_h * canvas_w)
             break
-    max_bg_remove_area = total_area * 0.003
+    max_bg_remove_area = total_area * 0.005
 
+    # 1. 计算每个图层在自底向上堆叠渲染后，真正暴露在最终画面上的「有效可见像素图」
+    # 按照从顶到底的遮挡累积
+    occlusion_map = np.zeros((canvas_h, canvas_w), dtype=bool)
+    visible_pixel_counts = {}
+
+    for i in range(n - 1, -1, -1):
+        m = layer_masks.get(i)
+        if m is None:
+            visible_pixel_counts[i] = 0
+            continue
+        m_bool = (m > 0)
+        # 该图层真正露在外面的像素 = 自己的像素 扣除 上方所有图层的遮挡
+        visible_mask = np.logical_and(m_bool, np.logical_not(occlusion_map))
+        visible_pixel_counts[i] = int(np.sum(visible_mask))
+        # 累积自己的遮挡给下方的图层
+        occlusion_map = np.logical_or(occlusion_map, m_bool)
+
+    # 2. 自顶向下进行三维判定
     for i in range(n - 1, 0, -1):
         if i in to_remove:
             continue
@@ -449,44 +474,58 @@ def prune_shapes_by_rendered_masks(
             to_remove.add(i)
             continue
         current_area = int((current_mask > 0).sum())
-        if current_area < 5:
+        visible_area = visible_pixel_counts.get(i, current_area)
+
+        # 规则 A：完全被上方遮挡或仅剩微弱噪点（有效可见像素 < 10px）
+        if current_area < 8 or visible_area < 8:
             to_remove.add(i)
-            # print(f"移除 shape {i} (area={current_area})：极小/不可见图层")
+            # print(f"  [剪枝] 移除 shape #{i} (可见像素={visible_area}px): 几乎被完全遮挡或极小噪点")
             continue
 
-        area_ratio = float(current_area) / float(max(total_area, 1))
-        # 面积较大时严格使用用户设定的 base_color_thresh；微小碎片适度允许容差
-        if area_ratio > 0.001:
-            color_thresh_i = base_color_thresh
-        else:
-            color_thresh_i = base_color_thresh * 1.5
-
         current_color = shape_groups[i].fill_color[:3]
+        area_ratio = float(current_area) / float(max(total_area, 1))
+
+        # 小碎片允许更宽泛的感知色差容差
+        if area_ratio < 0.002:
+            delta_e_limit = base_delta_e * 1.5
+        else:
+            delta_e_limit = base_delta_e
 
         for j in range(i - 1, -1, -1):
             if j in to_remove:
                 continue
+
+            # 检查与背景层 0 的从属
             if j == 0:
-                existing_color = shape_groups[0].fill_color[:3]
-                dist = color_similarity(existing_color, current_color, device)
-                if dist < color_thresh_i:
-                    if current_area <= max_bg_remove_area:
-                        to_remove.add(i)
-                        # print(f"移除 shape {i} (area={current_area}): 贴背景层小碎片且颜色相近")
+                bg_color = shape_groups[0].fill_color[:3]
+                d_e_bg = color_similarity_lab(bg_color, current_color, device)
+                if d_e_bg < delta_e_limit and current_area <= max_bg_remove_area:
+                    to_remove.add(i)
+                    # print(f"  [剪枝] 移除 shape #{i} (area={current_area}): 贴底色背景碎屑且 CIELAB DeltaE={d_e_bg:.2f}")
                 break
 
             existing_mask = layer_masks.get(j)
             if existing_mask is None:
                 continue
-            if is_mask_included(
-                current_mask, existing_mask, inclusion_threshold=effective_inclusion
-            ):
+
+            # 几何重合 / 包含度检验
+            is_inc = is_mask_included(current_mask, existing_mask, inclusion_threshold=effective_inclusion)
+            
+            # 特殊情况：对于贴在父级边缘的极小碎屑 (面积 < 0.2%)，若与父级大面积接触重合 (>60%)
+            if not is_inc and area_ratio < 0.002:
+                inter_p = np.logical_and(current_mask > 0, existing_mask > 0).sum()
+                if (inter_p / float(current_area + 1e-6)) >= 0.60:
+                    is_inc = True
+
+            if is_inc:
                 existing_color = shape_groups[j].fill_color[:3]
-                dist = color_similarity(existing_color, current_color, device)
-                if dist < color_thresh_i:
+                d_e = color_similarity_lab(existing_color, current_color, device)
+
+                # CIELAB 色差低于阈值，判定为计算机视觉同色冗余
+                if d_e < delta_e_limit:
                     to_remove.add(i)
-                    # print(f"移除 shape {i} (area={current_area}): 被直接父级 shape {j} 包含且颜色相近")
-                break
+                    # print(f"  [剪枝] 移除 shape #{i} (area={current_area}): 被直接父级 #{j} 包含且 CIELAB DeltaE={d_e:.2f} < {delta_e_limit:.2f}")
+                    break
 
     for idx in sorted(list(to_remove), reverse=True):
         del shapes[idx]

@@ -583,13 +583,38 @@ def mask_color_Kmeans(image, mask, n_clusters=3, threshold=0.9):
     
     return tuple(main_color)
 
+def color_similarity_lab(color1: torch.Tensor, color2: torch.Tensor, device: torch.device) -> float:
+    """
+    计算两个颜色之间的 CIELAB 感知色差 Delta E。
+    结合 CIELAB 与人类加权感知，消灭单纯 RGB 欧氏距离在蓝色/深色区域的感知盲区。
+    返回：标量 Delta E (0~100 scale，通常 < 8.0 属于紧密同色系，< 2.3 属于人眼不可分辨)
+    """
+    c1 = color1.detach().cpu().numpy().reshape(-1)[:3]
+    c2 = color2.detach().cpu().numpy().reshape(-1)[:3]
+
+    # 若输入为 [0, 1] 浮点，映射至 [0, 255]
+    if np.max(c1) <= 1.05 and np.max(c2) <= 1.05:
+        rgb1_u8 = np.clip(c1 * 255.0, 0, 255).astype(np.uint8).reshape(1, 1, 3)
+        rgb2_u8 = np.clip(c2 * 255.0, 0, 255).astype(np.uint8).reshape(1, 1, 3)
+    else:
+        rgb1_u8 = np.clip(c1, 0, 255).astype(np.uint8).reshape(1, 1, 3)
+        rgb2_u8 = np.clip(c2, 0, 255).astype(np.uint8).reshape(1, 1, 3)
+
+    # 转换至 CIELAB 空间
+    lab1 = cv2.cvtColor(rgb1_u8, cv2.COLOR_RGB2LAB).astype(float)[0, 0]
+    lab2 = cv2.cvtColor(rgb2_u8, cv2.COLOR_RGB2LAB).astype(float)[0, 0]
+
+    # CIELAB Delta E (CIE76)
+    delta_e = float(np.linalg.norm(lab1 - lab2))
+    return delta_e
+
+
 def color_similarity(color1, color2, device):
     """
-    计算两个颜色之间的欧氏距离，返回一个标量，值越小表示颜色越相似
+    兼容既有接口：调用高精度 CIELAB 感知距离 (返回归一化至 0~1 的度量)。
     """
-    color1 = color1.to(device)  # 确保 color1 在正确的设备上
-    color2 = color2.to(device)  # 确保 color2 在正确的设备上
-    return torch.sqrt(torch.sum((color1 - color2) ** 2))
+    delta_e = color_similarity_lab(color1, color2, device)
+    return delta_e / 100.0
 
 def is_mask_included(current_mask, existing_mask, inclusion_threshold=0.8):
     """
