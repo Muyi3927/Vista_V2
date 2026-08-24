@@ -62,7 +62,7 @@ graph LR
 
 ```bash
 git clone https://github.com/Muyi3927/Vista_V2.git
-cd VISTA
+cd Vista_V2
 
 conda create -n vista python=3.10 -y
 conda activate vista
@@ -81,9 +81,17 @@ conda install pytorch==1.13.1 torchvision==0.14.1 torchaudio==0.13.1 pytorch-cud
 git clone https://github.com/BachiLi/diffvg.git
 cd diffvg
 git submodule update --init --recursive
+# PyTorch 1.13.1 与新版 MKL 存在兼容性问题
+conda install -y "mkl=2023.1" "intel-openmp=2023.1"
+# Basic dependencies
 conda install -y numpy scikit-image
-conda install -y -c anaconda cmake
+# diffvg build dependencies
+conda install -y -c conda-forge "cmake=3.27"
+conda install -y -c nvidia "cuda-nvcc=11.7"
 conda install -y -c conda-forge ffmpeg
+# Python dependencies
+pip install svgwrite svgpathtools cssutils numba torch-tools visdom
+# Build diffvg
 python setup.py install
 cd ..
 ```
@@ -170,12 +178,12 @@ from config import load_config
 # 加载默认配置并进行运行时参数自定义覆盖
 cfg = load_config(overrides={
     "paths": {"sam_checkpoint": "checkpoints/sam_vit_h_4b8939.pth"},
-    "preprocess": {"target_size": 512},
-    "optimize": {"num_iters": 500}
+    "preprocess": {"target_size": 0},
+    "optimize": {"num_iters": 1000}
 })
 
 summary = process_single_image(
-    image_path="dataset/tmp/emoji_1.png",
+    image_path="dataset/emoji_1.png",
     base_out_dir="out/run",
     final_out_dir="out/run/final_out",
     cfg=cfg

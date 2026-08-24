@@ -19,11 +19,11 @@ run:
 
 paths:
   # 输入图像文件或包含图像的目录路径
-  input: /home/jh/research/projects/VISTA_dev/VISTA/dataset/emoji_2.png
+  input: dataset/emoji_2.png
   # 矢量化结果（SVG/GIF/JSON）输出根目录
   output: outputs
   # SAM 语义分割模型权重路径
-  sam_checkpoint: /home/jh/research/projects/VISTA/sam_vit_h_4b8939.pth
+  sam_checkpoint: checkpoints/sam_vit_h_4b8939.pth
 
 # 计算设备：auto (优先GPU) | cuda:0 | cpu
 device: auto
