@@ -656,7 +656,9 @@ def perform_fusion_and_save(
     def _get_mask_filename(idx: int, item: Dict) -> str:
         if item["source"] == "bg":
             return f"{idx:03d}_bg.png"
-        return f"{idx:03d}_{item['source']}_m{item['orig_idx']:02d}_d{item['depth']}_cc{item['cc_idx']}.png"
+        std_str = f"s{int(round(item.get('homogeneity_std', 0.0))):02d}"
+        area_str = f"a{int(item.get('area', 0))}"
+        return f"{idx:03d}_{item['source']}_m{item.get('orig_idx', 0):02d}_{area_str}_{std_str}_cc{item.get('cc_idx', 1)}.png"
 
     # 按照面积大小另存 IoU 去重后、纯度吸收前的中间掩码与彩色掩码
     if output_sub_dir is not None and save_nms_masks:
@@ -713,46 +715,6 @@ def perform_fusion_and_save(
 
     final_masks = [surviving[idx] for idx in range(n) if idx not in to_remove]
     print(f"  --> [Stage 3] 融合完成！终极保留优质图层: {len(final_masks)} 个")
-
-    if output_sub_dir is not None:
-        pre_dir = output_sub_dir / "pre_masks"
-        pre_col_dir = output_sub_dir / "pre_colored_masks" if save_color_mask else None
-        pre_dir.mkdir(parents=True, exist_ok=True)
-
-        meta_info = {
-            "num_masks": len(final_masks),
-            "output_dir": str(pre_dir),
-            "image_width": w,
-            "image_height": h,
-            "background_color": bg_color,
-            "masks": [],
-        }
-
-        for idx, item in enumerate(final_masks):
-            out_name = _get_mask_filename(idx, item)
-            _save_mask_item(
-                item["mask_image"], item["fill_color"], pre_dir, pre_col_dir,
-                out_name, export_size, (h, w), save_color_mask
-            )
-            meta_info["masks"].append({
-                "id": idx,
-                "filename": out_name,
-                "area": item["area"],
-                "fill_color": item["fill_color"],
-                "homogeneity_std": round(item["homogeneity_std"], 2),
-                "source": item["source"],
-                "orig_idx": item["orig_idx"],
-                "depth": item["depth"],
-                "cc_idx": item["cc_idx"],
-            })
-
-        _save_overview_colored(final_masks, output_sub_dir / "pre_overview_colored.png", (h, w), export_size)
-        with open(output_sub_dir / "pre_masks_meta.json", "w", encoding="utf-8") as f:
-            json.dump(meta_info, f, ensure_ascii=False, indent=2)
-
-        print(f"[OK] 最终精简分层成功保存至: {pre_dir}")
-        print(f"[OK] 最终效果全彩预览已生成: {output_sub_dir / 'pre_overview_colored.png'}")
-
     return final_masks
 
 
@@ -773,7 +735,7 @@ def run_segmentation(
     阶段 1：SLIC 自适应超像素 + SAM 语义候选提取 (严格保持中空拓扑)；
     阶段 2：原生中空形态学平滑与单连通拆解 (无孔洞杂色污染的真实纯度采样)；
     阶段 3：SAM 高精度自去重、纯度感知压制 SLIC、CIELAB 纯度双锁父子同色吸收；
-    阶段 3 尾声：统一对最终存活图层执行闭合孔洞几何填实 (_fill_holes)，导出实心 pre_masks。
+    阶段 3 尾声：统一对最终存活图层执行闭合孔洞几何填实 (_fill_holes)，按填实后的真实面积严格降序重排，导出实心 pre_masks。
     返回：(pre_mask_paths 掩码路径列表, bg_color 画布背景色)
     """
     output_path = Path(output_dir)
@@ -816,27 +778,83 @@ def run_segmentation(
     # 2. 阶段 3: 在 100% 真实纯度下执行跨界立体压制与 CIELAB 父子同色吸收
     fused_masks = perform_fusion_and_save(image_rgb, pure_proposals, output_path, cfg)
 
-    # 3. 阶段 3 尾声：对最终精简留存图层执行闭合孔洞几何填实
-    print("  [后置几何实心化] 对最终精简图层执行闭合孔洞填实...")
+    # 3. 阶段 3 尾声：对最终精简留存图层执行闭合孔洞填实，并严格按填实后的实心面积从大到小重新排序
+    print("  [后置几何实心化 & 面积重排序] 对最终精简图层执行闭合孔洞填实并按实心面积严格降序排列...")
     save_color_mask = bool(cfg.get("save_color_mask", cfg.get("save_options", {}).get("save_color_mask", True)))
+    export_size = int(cfg.get("export_size", cfg.get("preprocess", {}).get("target_size", 0)))
+    h, w = image_rgb.shape[:2]
     pre_dir = output_path / "pre_masks"
     pre_col_dir = output_path / "pre_colored_masks" if save_color_mask else None
-    pre_paths = []
 
-    for idx, item in enumerate(fused_masks):
-        if item["source"] != "bg":
+    # 清理并重置 pre_masks 与 pre_colored_masks 目录，确保序号严格对应最终排序
+    if pre_dir.exists():
+        shutil.rmtree(pre_dir)
+    pre_dir.mkdir(parents=True, exist_ok=True)
+    if pre_col_dir is not None:
+        if pre_col_dir.exists():
+            shutil.rmtree(pre_col_dir)
+        pre_col_dir.mkdir(parents=True, exist_ok=True)
+
+    # 3.1 填洞并更新实心面积
+    bg_mask_item = None
+    fg_solid_items = []
+
+    for item in fused_masks:
+        if item["source"] == "bg":
+            bg_mask_item = item
+        else:
             filled_m, _ = _fill_holes(item["mask_image"])
             item["mask_image"] = filled_m
-            out_name = f"{idx:03d}_{item['source']}_m{item['orig_idx']:02d}_d{item['depth']}_cc{item['cc_idx']}.png"
-            out_file = pre_dir / out_name
-            _save_mask_item(
-                item["mask_image"], item["fill_color"], pre_dir, pre_col_dir,
-                out_name, 0, image_rgb.shape[:2], save_color_mask
-            )
+            item["solid_area"] = int((filled_m > 0).sum())
+            fg_solid_items.append(item)
+
+    # 3.2 严格按照实心面积从大到小降序重排（大面片垫底，小细节置顶，彻底消除后续矢量化遮挡错乱）
+    fg_solid_items = sorted(fg_solid_items, key=lambda x: x["solid_area"], reverse=True)
+
+    final_sorted_masks = ([bg_mask_item] if bg_mask_item is not None else []) + fg_solid_items
+    pre_paths = []
+
+    meta_info = {
+        "num_masks": len(final_sorted_masks),
+        "output_dir": str(pre_dir),
+        "image_width": w,
+        "image_height": h,
+        "background_color": [int(x) for x in get_canvas_background_color(image_rgb)],
+        "masks": [],
+    }
+
+    # 3.3 规范化命名：反映 [层级序号]_[算法来源]_m[原始序号]_a[实心面积]_s[色彩标准差]_cc[连通序号]
+    for idx, item in enumerate(final_sorted_masks):
+        if item["source"] == "bg":
+            out_name = f"{idx:03d}_bg.png"
+        else:
+            std_str = f"s{int(round(item.get('homogeneity_std', 0.0))):02d}"
+            area_str = f"a{int(item.get('solid_area', item.get('area', 0)))}"
+            out_name = f"{idx:03d}_{item['source']}_m{item.get('orig_idx', 0):02d}_{area_str}_{std_str}_cc{item.get('cc_idx', 1)}.png"
+
+        out_file = pre_dir / out_name
+        _save_mask_item(
+            item["mask_image"], item["fill_color"], pre_dir, pre_col_dir,
+            out_name, export_size, (h, w), save_color_mask
+        )
+        if item["source"] != "bg":
             pre_paths.append(str(out_file))
 
-    # 同步重新生成实心化后的全景预览彩图
-    _save_overview_colored(fused_masks, output_path / "pre_overview_colored.png", image_rgb.shape[:2], 0)
+        meta_info["masks"].append({
+            "id": idx,
+            "filename": out_name,
+            "area": item.get("solid_area", item.get("area", 0)),
+            "fill_color": item["fill_color"],
+            "homogeneity_std": round(item.get("homogeneity_std", 0.0), 2),
+            "source": item["source"],
+            "orig_idx": item.get("orig_idx", 0),
+            "cc_idx": item.get("cc_idx", 1),
+        })
+
+    # 同步重新生成实心化后的全景预览彩图与 JSON 元数据
+    _save_overview_colored(final_sorted_masks, output_path / "pre_overview_colored.png", (h, w), export_size)
+    with open(output_path / "pre_masks_meta.json", "w", encoding="utf-8") as f:
+        json.dump(meta_info, f, ensure_ascii=False, indent=2)
 
     bg_color = tuple(get_canvas_background_color(image_rgb))
     return pre_paths, bg_color

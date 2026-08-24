@@ -19,7 +19,7 @@ run:
 
 paths:
   # 输入图像文件或包含图像的目录路径
-  input: /home/jh/research/projects/VISTA/dataset/pairs_50
+  input: /home/jh/research/projects/VISTA/dataset/pairs_50/tmp
   # 矢量化结果（SVG/GIF/JSON）输出根目录
   output: outputs/pairs_50_1
   # SAM 语义分割模型权重路径
