@@ -82,7 +82,7 @@ def load_config(path: Optional[str] = None, overrides: Optional[dict] = None) ->
     sam = cfg.setdefault("sam", {})
     sam.setdefault("enabled", True)
     sam.setdefault("model_type", "vit_h")
-    sam.setdefault("pred_iou_thresh", 0.9)
+    sam.setdefault("pred_iou_thresh", 0.88)
     sam.setdefault("stability_score_thresh", 0.95)
     sam.setdefault("crop_n_layers", 1)
     sam.setdefault("points_per_side", 64)
@@ -101,18 +101,18 @@ def load_config(path: Optional[str] = None, overrides: Optional[dict] = None) ->
     pre.setdefault("min_area", 0.00015)
     pre.setdefault("iou_sam_slic_thresh", 0.9)
     pre.setdefault("iou_threshold", 0.9)
-    pre.setdefault("inclusion_threshold", 0.95)
+    pre.setdefault("inclusion_threshold", 0.90)
     pre.setdefault("self_pure_std_thresh", 15.0)
     pre.setdefault("parent_pure_std_thresh", 3.0)
     pre.setdefault("color_diff_thresh", 5.0)
 
     # 路径拟合默认参数
     pf = cfg.setdefault("path_fit", {})
-    pf.setdefault("bezier_max_error", 1.5)
-    pf.setdefault("line_threshold", 2.0)
+    pf.setdefault("bezier_max_error", 0.003)
+    pf.setdefault("line_threshold", 0.004)
     if pf.get("poly_epsilon") is None:
-        pf["poly_epsilon"] = pf.get("bezier_max_error", 1.5)
-    pf.setdefault("contour_min_dist", 2.0)
+        pf["poly_epsilon"] = None
+    pf.setdefault("contour_min_dist", 0.004)
 
     # 优化超参数
     opt = cfg.setdefault("optimize", {})
@@ -134,8 +134,18 @@ def load_config(path: Optional[str] = None, overrides: Optional[dict] = None) ->
     prune.setdefault("enabled", True)
     prune.setdefault("rm_color_threshold", 0.02)
     prune.setdefault("inclusion_threshold", 0.8)
-    prune.setdefault("refine_iters", 80)
+    prune.setdefault("refine_iters", 100)
     prune.setdefault("raster_threshold", 0.5)
+
+    # 输出保存开关
+    save_opts = cfg.setdefault("save_options", {})
+    save_opts.setdefault("save_raw_masks", True)
+    save_opts.setdefault("save_origin_masks", True)
+    save_opts.setdefault("save_nms_masks", True)
+    save_opts.setdefault("save_pre_masks", True)
+    save_opts.setdefault("save_color_mask", True)
+    save_opts.setdefault("save_overview_images", True)
+    save_opts.setdefault("save_step_svgs", True)
 
     temp = (cfg.get("project") or {}).get("temp_outputs", "temp_outputs")
     cfg["project"]["temp_outputs"] = _abspath(root, temp)
@@ -171,12 +181,12 @@ def _export_legacy_constants(cfg: Dict[str, Any]) -> None:
     g["MODEL_TYPE"] = sam.get("model_type", "vit_h")
     g["DEVICE"] = cfg["_resolved_device"]
     g["TARGET_SIZE"] = int(pre.get("target_size", 0))
-    g["PREDICTION_IOU_THRESHOLD"] = float(sam.get("pred_iou_thresh", 0.9))
+    g["PREDICTION_IOU_THRESHOLD"] = float(sam.get("pred_iou_thresh", 0.88))
     g["STABILITY_SCORE_THRESHOLD"] = float(sam.get("stability_score_thresh", 0.95))
     g["CROP_N_LAYERS"] = int(sam.get("crop_n_layers", 1))
     g["MIN_AREA"] = pre.get("min_area", 0.00015)
-    g["BEZIER_MAX_ERROR"] = float(pf.get("bezier_max_error", 1.5))
-    g["LINE_THRESHOLD"] = float(pf.get("line_threshold", 2.0))
+    g["BEZIER_MAX_ERROR"] = pf.get("bezier_max_error", 0.003)
+    g["LINE_THRESHOLD"] = pf.get("line_threshold", 0.004)
     g["LEARNING_RATE"] = float(opt.get("learning_rate", 0.1))
     g["NUM_ITERS"] = int(opt.get("num_iters", 1000))
     g["IS_STROKE"] = bool(opt.get("is_stroke", False))
