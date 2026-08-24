@@ -16,6 +16,7 @@ from copy import deepcopy
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+import torch
 
 from config import get_config, load_config
 from segmentation import run_segmentation, run_segmentation_late_fill
@@ -88,7 +89,7 @@ def create_job(
     )
     target_path = save_target_image(target_pil, target_img_dir, os.path.basename(image_path))
     target_rgb = np.array(target_pil)
-    has_alpha = (alpha_mask is not None and np.sum(alpha_mask < 250) > 0)
+    has_alpha = (alpha_mask is not None and np.sum(alpha_mask < 128) > 50)
 
     return {
         "run_dir": run_dir,
@@ -200,6 +201,12 @@ def process_single_image(
         preloaded_model=preloaded_model,
         alpha_mask=job.get("alpha_mask"),
     )
+    
+    # 释放分阶段 GPU 显存，避免高分辨率下 DiffVG OOM 雪崩导致全部 Mask 为空
+    if torch.cuda.is_available():
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
 
     # 2. 贝塞尔拟合与可微优化
     # 若配置未强制指定 transparent_svg (即为 auto/null)，则根据原图是否为透明图自适应决定：

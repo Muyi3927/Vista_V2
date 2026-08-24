@@ -231,8 +231,15 @@ def load_and_resize(
         np_rgba = np.array(rgba_img)
         alpha_channel = np_rgba[:, :, 3]
 
-        if return_alpha_mask:
+        # 仅当存在真正的透明背景像素 (alpha < 128) 时才认定为透明背景图
+        real_transparent_pixels = int(np.sum(alpha_channel < 128))
+        if real_transparent_pixels < max(50, int(alpha_channel.size * 0.001)):
+            has_alpha = False
+
+        if return_alpha_mask and has_alpha:
             alpha_mask_np = (alpha_channel > 10).astype(np.uint8) * 255
+        elif return_alpha_mask:
+            alpha_mask_np = None
 
         # 决定合成底色：若未指定，则进行自适应背景色计算（避免前景整体为纯白时被纯白底吞没）
         if bg_color is None:
