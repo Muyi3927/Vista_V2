@@ -242,9 +242,9 @@ def rasterize_layer_masks(shapes: List[pydiffvg.Path], shape_groups: List[pydiff
     render = pydiffvg.RenderFunction.apply
     masks = {}
     for i, path in enumerate(shapes):
-        pts = path.points.detach()
+        pts = path.points.detach().clone().contiguous()
         ncp = path.num_control_points
-        sw = path.stroke_width.detach() if hasattr(path.stroke_width, "detach") else path.stroke_width
+        sw = path.stroke_width.detach().clone() if hasattr(path.stroke_width, "detach") else path.stroke_width
         is_closed = path.is_closed
         single = pydiffvg.Path(
             num_control_points=ncp,
@@ -445,8 +445,6 @@ def prune_shapes_by_rendered_masks(
             alpha_val = float(fill_col[3].item() if hasattr(fill_col[3], 'item') else fill_col[3])
             if alpha_val < min_alpha_threshold:
                 to_remove.add(i)
-                log_msg = f"[阶段4 几何剪枝] 移除 shape #{i} (透明度 Alpha={alpha_val:.4f} < {min_alpha_threshold:.2f}): 透明度过低"
-                print(f"  {log_msg}")
                 prune_removal_logs.append({
                     "stage": "stage4_geometry_pruning",
                     "shape_id": i,
@@ -501,8 +499,6 @@ def prune_shapes_by_rendered_masks(
         # 规则 A：完全被上方遮挡或仅剩微弱噪点（有效可见像素 < 10px）
         if current_area < 8 or visible_area < 8:
             to_remove.add(i)
-            log_msg = f"[阶段4 几何剪枝] 移除 shape #{i} (总面积={current_area}px, 有效可见像素={visible_area}px): 几乎被上方完全遮挡或极小噪点"
-            print(f"  {log_msg}")
             prune_removal_logs.append({
                 "stage": "stage4_geometry_pruning",
                 "shape_id": i,
@@ -563,8 +559,6 @@ def prune_shapes_by_rendered_masks(
                 # CIELAB 色差低于阈值，判定为计算机视觉同色冗余
                 if d_e < delta_e_limit:
                     to_remove.add(i)
-                    log_msg = f"[阶段4 几何剪枝] 移除 shape #{i} (面积={current_area}): 被直接父级 #{j} 包含且 CIELAB DeltaE={d_e:.2f} < {delta_e_limit:.2f}"
-                    print(f"  {log_msg}")
                     prune_removal_logs.append({
                         "stage": "stage4_geometry_pruning",
                         "shape_id": i,
