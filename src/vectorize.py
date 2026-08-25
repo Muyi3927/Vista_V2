@@ -421,9 +421,10 @@ def prune_shapes_by_rendered_masks(
     shape_groups: List[pydiffvg.ShapeGroup],
     layer_masks: Dict[int, np.ndarray],
     device: torch.device,
-    rm_color_threshold: float = 0.04,
+    rm_color_threshold: float = 3.0,
     inclusion_threshold: float = 0.8,
     min_alpha_threshold: float = 0.05,
+    output_dir: Optional[str] = None,
 ) -> Tuple[List[pydiffvg.Path], List[pydiffvg.ShapeGroup], Dict[int, np.ndarray], int, List[Dict[str, Any]]]:
     """
     【高精度三维立体剪枝】：
@@ -438,24 +439,6 @@ def prune_shapes_by_rendered_masks(
     prune_removal_logs = []
     print("移除多余 path（基于透明度过滤、CIELAB 感知色彩冗余、有效可见像素与光栅化几何）...")
 
-    # 0. 优先扫描并剔除透明度过低的 shape (幽灵图层)
-    for i in range(1, n):
-        fill_col = shape_groups[i].fill_color
-        if fill_col is not None and len(fill_col) >= 4:
-            alpha_val = float(fill_col[3].item() if hasattr(fill_col[3], 'item') else fill_col[3])
-            if alpha_val < min_alpha_threshold:
-                to_remove.add(i)
-                prune_removal_logs.append({
-                    "stage": "stage4_geometry_pruning",
-                    "shape_id": i,
-                    "alpha": round(alpha_val, 4),
-                    "reason": f"透明度 Alpha={alpha_val:.4f} 低于阈值 {min_alpha_threshold:.2f} (幽灵图层)"
-                })
-
-    # CIELAB Delta E 阈值换算：rm_color_threshold 0.04 对应 Delta E 约为 8.0~10.0
-    base_delta_e = float(rm_color_threshold) * 200.0 if rm_color_threshold is not None else 8.0
-    effective_inclusion = float(inclusion_threshold) if inclusion_threshold is not None else 0.75
-
     total_area = 512 * 512
     canvas_h, canvas_w = 512, 512
     for m in layer_masks.values():
@@ -463,6 +446,53 @@ def prune_shapes_by_rendered_masks(
             canvas_h, canvas_w = m.shape[:2]
             total_area = int(canvas_h * canvas_w)
             break
+
+    # 导出各 Shape 的独立 SVG 预览以便在 HTML 中可视化
+    pruned_svg_dir = None
+    if output_dir is not None:
+        pruned_svg_dir = os.path.join(output_dir, "pruned_shapes")
+        os.makedirs(pruned_svg_dir, exist_ok=True)
+
+    def _export_single_shape_svg(shape_idx: int) -> Optional[str]:
+        if pruned_svg_dir is None or shape_idx >= len(shapes):
+            return None
+        svg_fname = f"shape_{shape_idx:03d}.svg"
+        svg_fpath = os.path.join(pruned_svg_dir, svg_fname)
+        try:
+            s_single = [shapes[shape_idx]]
+            g_single = [
+                pydiffvg.ShapeGroup(
+                    shape_ids=torch.tensor([0]),
+                    fill_color=shape_groups[shape_idx].fill_color,
+                    stroke_color=shape_groups[shape_idx].stroke_color if shape_groups[shape_idx].stroke_color is not None else torch.tensor([0.0, 0.0, 0.0, 0.0]),
+                )
+            ]
+            _save_svg_with_viewbox(svg_fpath, canvas_w, canvas_h, s_single, g_single)
+            return f"pruned_shapes/{svg_fname}"
+        except Exception as e:
+            print(f"[Warning] 导出剪枝 Shape #{shape_idx} SVG 失败: {e}")
+            return None
+
+    # 0. 优先扫描并剔除透明度过低的 shape (幽灵图层)
+    for i in range(1, n):
+        fill_col = shape_groups[i].fill_color
+        if fill_col is not None and len(fill_col) >= 4:
+            alpha_val = float(fill_col[3].item() if hasattr(fill_col[3], 'item') else fill_col[3])
+            if alpha_val < min_alpha_threshold:
+                to_remove.add(i)
+                svg_rel = _export_single_shape_svg(i)
+                prune_removal_logs.append({
+                    "stage": "stage4_geometry_pruning",
+                    "shape_id": i,
+                    "shape_svg": svg_rel,
+                    "alpha": round(alpha_val, 4),
+                    "reason": f"透明度 Alpha={alpha_val:.4f} 低于阈值 {min_alpha_threshold:.2f} (幽灵图层)"
+                })
+
+    # 直接使用配置的 CIELAB 感知色差 Delta E 阈值（默认 3.0，不再进行 200 倍缩放）
+    base_delta_e = float(rm_color_threshold) if rm_color_threshold is not None else 3.0
+    effective_inclusion = float(inclusion_threshold) if inclusion_threshold is not None else 0.75
+
     max_bg_remove_area = total_area * 0.005
 
     # 1. 计算每个图层在自底向上堆叠渲染后，真正暴露在最终画面上的「有效可见像素图」
@@ -492,16 +522,27 @@ def prune_shapes_by_rendered_masks(
         current_mask = layer_masks.get(i)
         if current_mask is None:
             to_remove.add(i)
+            svg_rel = _export_single_shape_svg(i)
+            prune_removal_logs.append({
+                "stage": "stage4_geometry_pruning",
+                "shape_id": i,
+                "shape_svg": svg_rel,
+                "total_area": 0,
+                "visible_area": 0,
+                "reason": "掩码无效或光栅化为空"
+            })
             continue
         current_area = int((current_mask > 0).sum())
         visible_area = visible_pixel_counts.get(i, current_area)
 
-        # 规则 A：完全被上方遮挡或仅剩微弱噪点（有效可见像素 < 10px）
+        # 规则 A：完全被上方遮挡或仅剩微弱噪点（有效可见像素 < 8px）
         if current_area < 8 or visible_area < 8:
             to_remove.add(i)
+            svg_rel = _export_single_shape_svg(i)
             prune_removal_logs.append({
                 "stage": "stage4_geometry_pruning",
                 "shape_id": i,
+                "shape_svg": svg_rel,
                 "total_area": current_area,
                 "visible_area": visible_area,
                 "reason": "几乎被上方图层完全遮挡或有效可见面积过小(<8px)"
@@ -527,15 +568,17 @@ def prune_shapes_by_rendered_masks(
                 d_e_bg = color_similarity_lab(bg_color, current_color, device)
                 if d_e_bg < delta_e_limit and current_area <= max_bg_remove_area:
                     to_remove.add(i)
-                    log_msg = f"[阶段4 几何剪枝] 移除 shape #{i} (面积={current_area}): 贴底色背景碎屑且 CIELAB DeltaE={d_e_bg:.2f} < {delta_e_limit:.2f}"
-                    print(f"  {log_msg}")
+                    svg_rel = _export_single_shape_svg(i)
+                    p_svg_rel = _export_single_shape_svg(0)
                     prune_removal_logs.append({
                         "stage": "stage4_geometry_pruning",
                         "shape_id": i,
+                        "shape_svg": svg_rel,
                         "parent_id": 0,
+                        "parent_svg": p_svg_rel,
                         "total_area": current_area,
                         "delta_e": round(float(d_e_bg), 2),
-                        "reason": f"贴底色背景碎屑且 CIELAB DeltaE={d_e_bg:.2f} 同色"
+                        "reason": f"贴底色背景碎屑且 CIELAB DeltaE={d_e_bg:.2f} < {delta_e_limit:.2f} 同色"
                     })
                 break
 
@@ -559,13 +602,17 @@ def prune_shapes_by_rendered_masks(
                 # CIELAB 色差低于阈值，判定为计算机视觉同色冗余
                 if d_e < delta_e_limit:
                     to_remove.add(i)
+                    svg_rel = _export_single_shape_svg(i)
+                    p_svg_rel = _export_single_shape_svg(j)
                     prune_removal_logs.append({
                         "stage": "stage4_geometry_pruning",
                         "shape_id": i,
+                        "shape_svg": svg_rel,
                         "parent_id": j,
+                        "parent_svg": p_svg_rel,
                         "total_area": current_area,
                         "delta_e": round(float(d_e), 2),
-                        "reason": f"被父级 #{j} 包含且 CIELAB DeltaE={d_e:.2f} 同色剪枝"
+                        "reason": f"被父级 #{j} 包含且 CIELAB DeltaE={d_e:.2f} < {delta_e_limit:.2f} 同色剪枝"
                     })
                     break
 
@@ -581,6 +628,7 @@ def prune_shapes_by_rendered_masks(
             new_masks[new_i] = layer_masks[old_i]
 
     print(f"共移除 {len(to_remove)} 个 path，剩余 {len(shapes)}")
+    return shapes, shape_groups, new_masks, len(to_remove), prune_removal_logs
     return shapes, shape_groups, new_masks, len(to_remove), prune_removal_logs
 
 
@@ -601,7 +649,7 @@ def svg_optimize(
     early_stopping_patience: int = 20,
     early_stopping_delta: float = 5e-5,
     is_stroke: bool = False,
-    rm_color_threshold: float = 0.02,
+    rm_color_threshold: float = 3.0,
     color_lr: float = 0.01,
     stroke_width_lr: float = 0.05,
     stroke_color_lr: float = 0.01,
@@ -684,6 +732,7 @@ def svg_optimize(
             rm_color_threshold=rm_color_threshold,
             inclusion_threshold=prune_inclusion_threshold,
             min_alpha_threshold=min_alpha_threshold,
+            output_dir=result_path,
         )
         index_mask_dict.clear()
         index_mask_dict.update(layer_masks)
@@ -826,7 +875,7 @@ def run_vectorization(
         early_stopping_patience=int(opt_cfg.get("early_stopping_patience", 20)),
         early_stopping_delta=float(opt_cfg.get("early_stopping_delta", 5e-5)),
         is_stroke=bool(opt_cfg.get("is_stroke", False)),
-        rm_color_threshold=float(prune_cfg.get("rm_color_threshold", 0.02)),
+        rm_color_threshold=float(prune_cfg.get("rm_color_threshold", 3.0)),
         color_lr=float(opt_cfg.get("color_lr", 0.01)),
         stroke_width_lr=float(opt_cfg.get("stroke_width_lr", 0.05)),
         stroke_color_lr=float(opt_cfg.get("stroke_color_lr", 0.01)),

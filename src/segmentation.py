@@ -523,6 +523,9 @@ def process_morphology_keep_holes(
     pure_regions = sorted(pure_regions, key=lambda x: x["area"], reverse=True)
     for idx, item in enumerate(pure_regions):
         item["orig_sort_idx"] = idx
+        std_str = f"s{int(round(item.get('homogeneity_std', 0.0))):02d}"
+        area_str = f"a{int(item.get('area', 0))}"
+        item["origin_filename"] = f"{idx:03d}_{item['source']}_m{item.get('orig_idx', 0):02d}_{area_str}_{std_str}_cc{item.get('cc_idx', 1)}.png"
     print(f"  --> [Stage 2] 完成！生成保留原生纯度的单连通图层共 {len(pure_regions)} 个")
 
     if output_sub_dir is not None:
@@ -577,6 +580,8 @@ def perform_fusion_and_save(
     sam_list = [c for c in candidates if c["source"] == "sam"]
     slic_list = [c for c in candidates if c["source"] == "slic"]
 
+    stage3_removal_logs = []
+
     # 3.1 & 3.2 SAM 自去重与纯度感知跨界压制 SLIC
     kept_sam = []
     for s_item in sorted(sam_list, key=lambda x: x["area"], reverse=True):
@@ -585,6 +590,19 @@ def perform_fusion_and_save(
             iou = _compute_iou(s_item["mask_image"], k_item["mask_image"])
             if iou > iou_sam_internal_thresh:
                 is_dup = True
+                s_name = s_item.get("origin_filename", f"sam_m{s_item.get('orig_idx',0):02d}_a{s_item.get('area',0)}")
+                k_name = k_item.get("origin_filename", f"sam_m{k_item.get('orig_idx',0):02d}_a{k_item.get('area',0)}")
+                stage3_removal_logs.append({
+                    "stage": "stage3_sam_self_dedup",
+                    "action": "removed_sam_duplicate",
+                    "mask_info": s_name,
+                    "target_mask_file": s_item.get("origin_filename"),
+                    "kept_mask_file": k_item.get("origin_filename"),
+                    "area": int(s_item["area"]),
+                    "iou": round(float(iou), 4),
+                    "iou_threshold": round(float(iou_sam_internal_thresh), 4),
+                    "reason": f"SAM 内部自去重：与保留的图层 ({k_name}) IoU={iou:.4f} > {iou_sam_internal_thresh:.2f}"
+                })
                 break
         if not is_dup:
             kept_sam.append(s_item)
@@ -599,11 +617,13 @@ def perform_fusion_and_save(
         sl_mask = sl_item["mask_image"]
         sl_area = float(sl_item["area"])
         sl_col = np.array(sl_item["fill_color"], dtype=float)
+        sl_name = sl_item.get("origin_filename", f"slic_m{sl_item.get('orig_idx',0):02d}_a{sl_item.get('area',0)}")
 
         for k_sam in kept_sam:
             sam_std = k_sam.get("homogeneity_std", 0.0)
             sam_mask = k_sam["mask_image"]
             sam_area = float(k_sam["area"])
+            k_sam_name = k_sam.get("origin_filename", f"sam_m{k_sam.get('orig_idx',0):02d}_a{k_sam.get('area',0)}")
 
             inter = np.logical_and(sl_mask > 0, sam_mask > 0).sum()
             if inter == 0:
@@ -614,17 +634,42 @@ def perform_fusion_and_save(
             contain_ratio = inter / sl_area if sl_area > 0 else 0.0
 
             sam_col = np.array(k_sam["fill_color"], dtype=float)
-            c_diff = np.linalg.norm(sl_col - sam_col)
+            c_diff = float(np.linalg.norm(sl_col - sam_col))
 
             # 【纯度感知立体压制规则】：
             # 条件 1：高对称 IoU 重合 (>=0.85)，且 SAM 本身是纯色（不是多色容器） -> SAM 取代 SLIC
             if iou >= iou_sam_slic_thresh and sam_std <= sam_pure_suppress_std:
                 suppressed = True
+                stage3_removal_logs.append({
+                    "stage": "stage3_slic_suppression",
+                    "action": "suppressed_by_sam_iou",
+                    "mask_info": sl_name,
+                    "target_mask_file": sl_item.get("origin_filename"),
+                    "kept_mask_file": k_sam.get("origin_filename"),
+                    "area": int(sl_area),
+                    "iou": round(float(iou), 4),
+                    "iou_threshold": round(float(iou_sam_slic_thresh), 4),
+                    "sam_pure_std": round(float(sam_std), 2),
+                    "reason": f"跨界压制：与纯色 SAM 图层 ({k_sam_name}, 色彩方差={sam_std:.2f}) 对称 IoU={iou:.4f} >= {iou_sam_slic_thresh:.2f}"
+                })
                 break
 
             # 条件 2：包含度极高 (SLIC 85% 以上都在 SAM 内部) 且两者颜色极其接近 且 SAM 纯净
             if contain_ratio >= slic_contain_suppress_thresh and c_diff < 15.0 and sam_std <= sam_pure_suppress_std:
                 suppressed = True
+                stage3_removal_logs.append({
+                    "stage": "stage3_slic_suppression",
+                    "action": "suppressed_by_sam_containment",
+                    "mask_info": sl_name,
+                    "target_mask_file": sl_item.get("origin_filename"),
+                    "kept_mask_file": k_sam.get("origin_filename"),
+                    "area": int(sl_area),
+                    "contain_ratio": round(float(contain_ratio), 4),
+                    "contain_threshold": round(float(slic_contain_suppress_thresh), 4),
+                    "color_diff_rgb": round(float(c_diff), 2),
+                    "sam_pure_std": round(float(sam_std), 2),
+                    "reason": f"跨界压制：被纯色 SAM 图层 ({k_sam_name}) 包含 {contain_ratio*100:.1f}% 且 RGB色差={c_diff:.2f} < 15.0"
+                })
                 break
 
         if not suppressed:
@@ -646,6 +691,7 @@ def perform_fusion_and_save(
         "orig_sort_idx": 0,
         "nms_idx": 0,
         "homogeneity_std": 0.0,
+        "origin_filename": "000_bg.png",
     }
     surviving = [bg_item] + surviving_cands
     for idx, item in enumerate(surviving):
@@ -664,12 +710,11 @@ def perform_fusion_and_save(
             filled_m, _ = _fill_holes(item["mask_image"])
             filled_projections[idx] = filled_m > 0
 
-    stage3_removal_logs = []
-
     for i in range(n - 1, -1, -1):
         if i in to_remove or surviving[i]["source"] == "bg":
             continue
         cur = surviving[i]
+        cur_orig_file = cur.get("origin_filename", f"#{i:03d}_{cur['source']}_m{cur.get('orig_idx',0):02d}")
         cur_name = f"#{i:03d}_{cur['source']}_m{cur.get('orig_idx',0):02d}_a{cur.get('area',0)}"
         # 【自身纯度锁】：自身不纯（如包含多个色块/纹理）则独立保留，绝不被吸收
         if cur.get("homogeneity_std", 0.0) > self_thresh:
@@ -683,6 +728,7 @@ def perform_fusion_and_save(
             if j in to_remove:
                 continue
             parent = surviving[j]
+            parent_orig_file = parent.get("origin_filename", f"#{j:03d}_{parent['source']}_m{parent.get('orig_idx',0):02d}")
             parent_name = f"#{j:03d}_{parent['source']}_m{parent.get('orig_idx',0):02d}_a{parent.get('area',0)}"
             # 使用父级的实心几何投影判定包围关系，使包围洞口的容器成为真正的第一父级
             parent_solid_mask = filled_projections[j]
@@ -707,13 +753,17 @@ def perform_fusion_and_save(
                     print(f"  {log_msg}")
                     stage3_removal_logs.append({
                         "stage": "stage3_color_absorption",
+                        "action": "absorbed_by_direct_parent",
                         "mask_id": i,
                         "mask_info": cur_name,
+                        "target_mask_file": cur_orig_file,
                         "parent_id": j,
                         "parent_info": parent_name,
+                        "parent_mask_file": parent_orig_file,
                         "contain_ratio": round(inc_ratio, 4),
                         "delta_e": round(delta_e, 2),
-                        "reason": f"被父级以 {inc_ratio*100:.1f}% 包含且 CIELAB DeltaE={delta_e:.2f} 同色吸收"
+                        "delta_e_threshold": round(cielab_diff_thresh, 2),
+                        "reason": f"被父级以 {inc_ratio*100:.1f}% 包含且 CIELAB DeltaE={delta_e:.2f} < {cielab_diff_thresh:.2f} 同色吸收"
                     })
                 break
 

@@ -21,7 +21,7 @@ paths:
   # 输入图像文件或包含图像的目录路径
   input: /home/jh/research/projects/VISTA/dataset/pairs_50
   # 矢量化结果（SVG/GIF/JSON）输出根目录
-  output: outputs/test_pairs
+  output: outputs/test_pairs_v1
   # SAM 语义分割模型权重路径
   sam_checkpoint: checkpoints/sam_vit_h_4b8939.pth
 
@@ -45,7 +45,7 @@ slic:
   # 单个超像素期望物理边长（像素），>0 时自动根据图像分辨率计算超像素数：
   # n_segments = clip((H*W)/(cell_size^2), min_segments, max_segments)
   cell_size: 14.0
-  min_segments: 800
+  min_segments: 1000
   max_segments: 8000
   # 固定超像素数（仅当 cell_size <= 0 时生效）
   n_segments: 2000
@@ -141,9 +141,14 @@ optimize:
 # -----------------------------------------------------------------------------
 prune:
   enabled: true
-  # 剪枝颜色差异阈值（基于 CIELAB 感知色彩距离 Delta E 自动缩放，0.04 对应 Delta E 约为 8.0）
-  rm_color_threshold: 0.04
-  # 剪枝几何包含率阈值
+  # 剪枝 CIELAB 感知色彩差异阈值 Delta E（直接设定 Delta E，不再进行 200 倍缩放）：
+  #   - 默认值: 3.0
+  #   - 推荐范围: 1.0 ~ 10.0
+  #     * 1.0 ~ 2.0: 极其严格（仅消除完全不可见的同色噪点）
+  #     * 3.0 ~ 5.0: 标准平衡（推荐 3.0，有效剔除相近颜色冗余，保全图形层次）
+  #     * 6.0 ~ 8.0: 较为宽松（允许同色系较浅阴影/高光层被合并）
+  rm_color_threshold: 3.0
+  # 剪枝几何包含率阈值（当前图层被父级覆盖超过此比例时参与同色判定）
   inclusion_threshold: 0.75
   # 剪枝后二次微调迭代步数
   refine_iters: 100

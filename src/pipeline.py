@@ -227,18 +227,371 @@ def process_single_image(
         final_out_dir=final_out_dir,
     )
 
-    # 3. 记录全流程决策日志 (decision_log.json)：详细记录被移除的掩码、同色吸收原因与阶段4几何剪枝信息
+    # 3. 记录全流程决策日志 (decision_log.json & decision_log.md)：详细记录被移除的掩码、同色吸收原因与阶段4几何剪枝信息
+    stage3_logs = seg.get("stage3_removal_logs", [])
+    stage4_logs = vec.get("prune_logs", [])
+
+    sam_dedup_logs = [item for item in stage3_logs if item.get("stage") == "stage3_sam_self_dedup"]
+    slic_suppress_logs = [item for item in stage3_logs if item.get("stage") == "stage3_slic_suppression"]
+    color_absorption_logs = [item for item in stage3_logs if item.get("stage") == "stage3_color_absorption"]
+
     decision_log = {
         "image_path": image_path,
         "run_dir": run_dir,
-        "stage3_color_absorption_removals": seg.get("stage3_removal_logs", []),
-        "stage4_geometry_pruning_removals": vec.get("prune_logs", []),
-        "total_absorbed_masks_stage3": len(seg.get("stage3_removal_logs", [])),
-        "total_pruned_paths_stage4": len(vec.get("prune_logs", [])),
+        "statistics": {
+            "total_stage3_removed": len(stage3_logs),
+            "sam_self_dedup_count": len(sam_dedup_logs),
+            "slic_suppressed_count": len(slic_suppress_logs),
+            "color_absorbed_count": len(color_absorption_logs),
+            "stage4_pruned_paths_count": len(stage4_logs),
+            "final_retained_shapes": vec.get("shapes", 0),
+        },
+        "stage3_deduplication_removals": {
+            "sam_self_dedup": sam_dedup_logs,
+            "slic_cross_suppression": slic_suppress_logs,
+            "color_absorption": color_absorption_logs,
+        },
+        "stage4_geometry_pruning_removals": stage4_logs,
     }
     decision_log_path = os.path.join(run_dir, "decision_log.json")
     with open(decision_log_path, "w", encoding="utf-8") as f:
         json.dump(decision_log, f, indent=2, ensure_ascii=False)
+
+    # 导出便于查阅的 Markdown 决策报告
+    try:
+        md_lines = [
+            f"# VISTA 掩码去重与剪枝决策日志",
+            f"- **图像路径**: `{image_path}`",
+            f"- **输出目录**: `{run_dir}`",
+            f"- **阶段3 去重移除掩码总数**: {len(stage3_logs)} (SAM自去重: {len(sam_dedup_logs)}, SLIC跨界压制: {len(slic_suppress_logs)}, 父级同色吸收: {len(color_absorption_logs)})",
+            f"- **阶段4 几何剪枝移除数**: {len(stage4_logs)}",
+            f"- **最终保留矢量图层数**: {vec.get('shapes', 0)}",
+            "",
+            "## 阶段 3 掩码预处理去重详情",
+            "",
+            "### 1. SAM 内部高重合自去重 (SAM Self-Dedup)",
+        ]
+        if sam_dedup_logs:
+            md_lines.append("| 被移除图层 (Target) | 保留图层 (Kept) | 面积 (px) | IoU | 阈值 | 判定原因 |")
+            md_lines.append("|---|---|---|---|---|---|")
+            for item in sam_dedup_logs:
+                md_lines.append(f"| `{item.get('target_mask_file')}` | `{item.get('kept_mask_file')}` | {item.get('area')} | {item.get('iou')} | {item.get('iou_threshold')} | {item.get('reason')} |")
+        else:
+            md_lines.append("_无 SAM 自去重移除图层_")
+        md_lines.append("")
+
+        md_lines.append("### 2. SAM 纯度感知跨界压制 SLIC (SLIC Cross Suppression)")
+        if slic_suppress_logs:
+            md_lines.append("| 被移除 SLIC 图层 | 压制方 SAM 图层 | 面积 (px) | IoU / 包含率 | SAM 色彩方差 | 判定原因 |")
+            md_lines.append("|---|---|---|---|---|---|")
+            for item in slic_suppress_logs:
+                metric = f"IoU={item['iou']}" if "iou" in item else f"包含率={item.get('contain_ratio',0)*100:.1f}%"
+                md_lines.append(f"| `{item.get('target_mask_file')}` | `{item.get('kept_mask_file')}` | {item.get('area')} | {metric} | {item.get('sam_pure_std')} | {item.get('reason')} |")
+        else:
+            md_lines.append("_无 SLIC 跨界压制图层_")
+        md_lines.append("")
+
+        md_lines.append("### 3. CIELAB 纯度双锁直接父级同色吸收 (Color Absorption)")
+        if color_absorption_logs:
+            md_lines.append("| 被吸收图层 (Target) | 直接父级 (Parent) | 包含率 | CIELAB 色差 ΔE | ΔE 阈值 | 判定原因 |")
+            md_lines.append("|---|---|---|---|---|---|")
+            for item in color_absorption_logs:
+                md_lines.append(f"| `{item.get('target_mask_file')}` | `{item.get('parent_mask_file')}` | {item.get('contain_ratio',0)*100:.1f}% | {item.get('delta_e')} | {item.get('delta_e_threshold')} | {item.get('reason')} |")
+        else:
+            md_lines.append("_无同色吸收图层_")
+        md_lines.append("")
+
+        md_lines.append("## 阶段 4 矢量化几何剪枝详情")
+        if stage4_logs:
+            md_lines.append("| Shape ID | 父级 ID | 总面积 (px) | 可见面积 (px) | 色差 ΔE / 透明度 | 剪枝原因 |")
+            md_lines.append("|---|---|---|---|---|---|")
+            for item in stage4_logs:
+                s_id = f"#{item.get('shape_id')}"
+                p_id = f"#{item.get('parent_id')}" if item.get('parent_id') is not None else "-"
+                area = item.get('total_area', '-')
+                vis = item.get('visible_area', '-')
+                val = f"Alpha={item['alpha']}" if 'alpha' in item else (f"ΔE={item['delta_e']}" if 'delta_e' in item else "-")
+                md_lines.append(f"| {s_id} | {p_id} | {area} | {vis} | {val} | {item.get('reason')} |")
+        else:
+            md_lines.append("_无阶段 4 剪枝图层_")
+        md_lines.append("")
+
+        decision_md_path = os.path.join(run_dir, "decision_log.md")
+        with open(decision_md_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(md_lines))
+    except Exception as e:
+        print(f"[Warning] 生成 decision_log.md 异常: {e}")
+
+    # 导出交互式可视化 HTML 报告 (decision_log.html)，支持直接在浏览器中图文对照查看掩码图与裁决依据
+    try:
+        def _render_mask_img_tag(fname, label):
+            if not fname:
+                return "<span style='color:#999'>无</span>"
+            if fname == "000_bg.png":
+                return "<span class='badge bg-secondary'>000_bg (画布背景)</span>"
+            return f"""
+            <div class='mask-card'>
+                <div class='mask-tag'>{label}</div>
+                <img src='origin_colored_masks/{fname}' onerror="this.src='origin_masks/{fname}'; this.onerror=null;" alt='{fname}'>
+                <div class='mask-name'>{fname}</div>
+            </div>
+            """
+
+        html_content = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VISTA 去重与剪枝决策可视化报告 - {os.path.basename(image_path)}</title>
+    <style>
+        body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #f8fafc; color: #1e293b; margin: 0; padding: 24px; }}
+        .container {{ max-width: 1280px; margin: 0 auto; background: #ffffff; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); padding: 32px; }}
+        h1 {{ font-size: 24px; margin-top: 0; color: #0f172a; border-bottom: 2px solid #e2e8f0; padding-bottom: 16px; display: flex; align-items: center; justify-content: space-between; }}
+        .badge {{ display: inline-block; padding: 4px 10px; border-radius: 6px; font-size: 13px; font-weight: 600; background: #e0e7ff; color: #3730a3; }}
+        .stats-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin: 24px 0; }}
+        .stat-card {{ background: #f1f5f9; padding: 16px; border-radius: 8px; border-left: 4px solid #3b82f6; }}
+        .stat-card.orange {{ border-left-color: #f97316; }}
+        .stat-card.green {{ border-left-color: #10b981; }}
+        .stat-card.purple {{ border-left-color: #8b5cf6; }}
+        .stat-val {{ font-size: 24px; font-weight: 700; color: #0f172a; margin-top: 4px; }}
+        .stat-lbl {{ font-size: 13px; color: #64748b; font-weight: 500; }}
+        
+        .section-title {{ font-size: 18px; font-weight: 700; margin: 32px 0 16px 0; color: #1e293b; display: flex; align-items: center; gap: 8px; }}
+        .section-title::before {{ content: ""; display: inline-block; width: 6px; height: 18px; background: #3b82f6; border-radius: 3px; }}
+        
+        table {{ width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 14px; }}
+        th {{ background: #f8fafc; color: #475569; font-weight: 600; text-align: left; padding: 12px 16px; border-bottom: 2px solid #e2e8f0; }}
+        td {{ padding: 14px 16px; border-bottom: 1px solid #f1f5f9; vertical-align: middle; }}
+        tr:hover td {{ background: #f8fafc; }}
+        
+        .mask-card {{ display: inline-flex; flex-direction: column; align-items: center; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 6px; width: 140px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }}
+        .mask-card img {{ width: 120px; height: 80px; object-fit: contain; background: #0f172a; border-radius: 4px; }}
+        .mask-tag {{ font-size: 10px; font-weight: 700; color: #64748b; margin-bottom: 4px; text-transform: uppercase; }}
+        .mask-name {{ font-size: 11px; color: #334155; font-family: monospace; word-break: break-all; margin-top: 4px; text-align: center; }}
+        .vs-container {{ display: flex; align-items: center; gap: 12px; }}
+        .vs-badge {{ font-size: 12px; font-weight: 700; color: #94a3b8; background: #f1f5f9; padding: 4px 8px; border-radius: 4px; }}
+        
+        .reason-box {{ background: #fffbeb; border-left: 3px solid #f59e0b; padding: 8px 12px; border-radius: 4px; font-size: 13px; color: #92400e; }}
+        .reason-box.blue {{ background: #eff6ff; border-left-color: #3b82f6; color: #1e40af; }}
+        .reason-box.purple {{ background: #faf5ff; border-left-color: #a855f7; color: #6b21a8; }}
+        .empty-hint {{ color: #94a3b8; font-style: italic; padding: 12px 0; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>
+            <span>VISTA 去重与剪枝决策可视化报告</span>
+            <span class="badge">{os.path.basename(image_path)}</span>
+        </h1>
+        
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-lbl">阶段3 预处理去重总数</div>
+                <div class="stat-val">{len(stage3_logs)}</div>
+            </div>
+            <div class="stat-card orange">
+                <div class="stat-lbl">SAM 自去重 / SLIC 跨界压制</div>
+                <div class="stat-val">{len(sam_dedup_logs)} / {len(slic_suppress_logs)}</div>
+            </div>
+            <div class="stat-card purple">
+                <div class="stat-lbl">阶段3 父级同色吸收</div>
+                <div class="stat-val">{len(color_absorption_logs)}</div>
+            </div>
+            <div class="stat-card green">
+                <div class="stat-lbl">阶段4 几何剪枝 / 最终保留图层</div>
+                <div class="stat-val">{len(stage4_logs)} / {vec.get('shapes', 0)}</div>
+            </div>
+        </div>
+
+        <!-- 阶段 3.1 SAM 自去重 -->
+        <div class="section-title">1. SAM 内部高重合自去重 (SAM Self-Dedup: {len(sam_dedup_logs)})</div>
+        """
+        if sam_dedup_logs:
+            html_content += """
+            <table>
+                <thead>
+                    <tr>
+                        <th style="width:360px">图层对照 (被移除 vs 保留)</th>
+                        <th>图层面积</th>
+                        <th>IoU 重合度 / 阈值</th>
+                        <th>裁决依据与判定原因</th>
+                    </tr>
+                </thead>
+                <tbody>
+            """
+            for itm in sam_dedup_logs:
+                t_tag = _render_mask_img_tag(itm.get("target_mask_file"), "Target (移除)")
+                k_tag = _render_mask_img_tag(itm.get("kept_mask_file"), "Kept (保留)")
+                html_content += f"""
+                    <tr>
+                        <td>
+                            <div class="vs-container">
+                                {t_tag}
+                                <span class="vs-badge">VS</span>
+                                {k_tag}
+                            </div>
+                        </td>
+                        <td><b>{itm.get('area')}</b> px</td>
+                        <td><span class="badge">IoU = {itm.get('iou')}</span> <span style="color:#64748b">(>{itm.get('iou_threshold')})</span></td>
+                        <td><div class="reason-box blue">{itm.get('reason')}</div></td>
+                    </tr>
+                """
+            html_content += "</tbody></table>"
+        else:
+            html_content += "<div class='empty-hint'>无 SAM 自去重移除图层</div>"
+
+        # 阶段 3.2 SLIC 跨界压制
+        html_content += f"""
+        <!-- 阶段 3.2 SLIC 跨界压制 -->
+        <div class="section-title">2. SAM 纯度感知跨界压制 SLIC (SLIC Cross Suppression: {len(slic_suppress_logs)})</div>
+        """
+        if slic_suppress_logs:
+            html_content += """
+            <table>
+                <thead>
+                    <tr>
+                        <th style="width:360px">图层对照 (SLIC 被压制 vs SAM 压制方)</th>
+                        <th>SLIC 面积</th>
+                        <th>重合指标 (IoU / 包含率)</th>
+                        <th>SAM 纯度 & 裁决原因</th>
+                    </tr>
+                </thead>
+                <tbody>
+            """
+            for itm in slic_suppress_logs:
+                t_tag = _render_mask_img_tag(itm.get("target_mask_file"), "SLIC (移除)")
+                k_tag = _render_mask_img_tag(itm.get("kept_mask_file"), "SAM (保留)")
+                metric_str = f"<span class='badge'>IoU = {itm['iou']}</span>" if "iou" in itm else f"<span class='badge'>包含率 = {itm.get('contain_ratio',0)*100:.1f}%</span>"
+                html_content += f"""
+                    <tr>
+                        <td>
+                            <div class="vs-container">
+                                {t_tag}
+                                <span class="vs-badge">VS</span>
+                                {k_tag}
+                            </div>
+                        </td>
+                        <td><b>{itm.get('area')}</b> px</td>
+                        <td>{metric_str}</td>
+                        <td><div class="reason-box">{itm.get('reason')}</div></td>
+                    </tr>
+                """
+            html_content += "</tbody></table>"
+        else:
+            html_content += "<div class='empty-hint'>无 SLIC 跨界压制图层</div>"
+
+        # 阶段 3.3 同色吸收
+        html_content += f"""
+        <!-- 阶段 3.3 同色吸收 -->
+        <div class="section-title">3. CIELAB 纯度双锁直接父级同色吸收 (Color Absorption: {len(color_absorption_logs)})</div>
+        """
+        if color_absorption_logs:
+            html_content += """
+            <table>
+                <thead>
+                    <tr>
+                        <th style="width:360px">图层对照 (被吸收图层 vs 直接父级)</th>
+                        <th>包含率</th>
+                        <th>CIELAB 色差 ΔE / 阈值</th>
+                        <th>裁决原因</th>
+                    </tr>
+                </thead>
+                <tbody>
+            """
+            for itm in color_absorption_logs:
+                t_tag = _render_mask_img_tag(itm.get("target_mask_file"), "Child (被吸收)")
+                k_tag = _render_mask_img_tag(itm.get("parent_mask_file"), "Parent (父级)")
+                html_content += f"""
+                    <tr>
+                        <td>
+                            <div class="vs-container">
+                                {t_tag}
+                                <span class="vs-badge">VS</span>
+                                {k_tag}
+                            </div>
+                        </td>
+                        <td><span class="badge">{itm.get('contain_ratio',0)*100:.1f}%</span></td>
+                        <td><b>ΔE = {itm.get('delta_e')}</b> <span style="color:#64748b">(&lt;{itm.get('delta_e_threshold')})</span></td>
+                        <td><div class="reason-box purple">{itm.get('reason')}</div></td>
+                    </tr>
+                """
+            html_content += "</tbody></table>"
+        else:
+            html_content += "<div class='empty-hint'>无同色吸收图层</div>"
+
+        # 阶段 4 几何剪枝
+        def _render_shape_svg_tag(svg_rel_path, label):
+            if not svg_rel_path:
+                return "<span style='color:#999'>无</span>"
+            return f"""
+            <div class='mask-card'>
+                <div class='mask-tag'>{label}</div>
+                <img src='{svg_rel_path}' alt='{label}' style='background: #0f172a;'>
+                <div class='mask-name'>{os.path.basename(svg_rel_path)}</div>
+            </div>
+            """
+
+        html_content += f"""
+        <!-- 阶段 4 几何剪枝 -->
+        <div class="section-title">4. 阶段 4 矢量化几何剪枝详情 (Stage 4 Geometry Pruning: {len(stage4_logs)})</div>
+        """
+        if stage4_logs:
+            html_content += """
+            <table>
+                <thead>
+                    <tr>
+                        <th style="width:360px">图层几何预览 (剪枝 Shape vs 参考父级)</th>
+                        <th>Shape 编号</th>
+                        <th>总面积 / 可见面积</th>
+                        <th>指标 (Alpha / ΔE)</th>
+                        <th>剪枝判定原因</th>
+                    </tr>
+                </thead>
+                <tbody>
+            """
+            for itm in stage4_logs:
+                s_id = f"#{itm.get('shape_id')}"
+                p_id = f"#{itm.get('parent_id')}" if itm.get('parent_id') is not None else "-"
+                area = itm.get('total_area', '-')
+                vis = itm.get('visible_area', '-')
+                val = f"Alpha={itm['alpha']}" if 'alpha' in itm else (f"ΔE={itm['delta_e']}" if 'delta_e' in itm else "-")
+                
+                s_svg = _render_shape_svg_tag(itm.get("shape_svg"), f"Shape {s_id}")
+                if itm.get("parent_svg"):
+                    p_svg = _render_shape_svg_tag(itm.get("parent_svg"), f"Parent {p_id}")
+                    shape_preview = f"""
+                    <div class="vs-container">
+                        {s_svg}
+                        <span class="vs-badge">VS</span>
+                        {p_svg}
+                    </div>
+                    """
+                else:
+                    shape_preview = s_svg
+
+                html_content += f"""
+                    <tr>
+                        <td>{shape_preview}</td>
+                        <td><b>{s_id}</b></td>
+                        <td>{area} px / <span style='color:#3b82f6;'>{vis} px</span></td>
+                        <td><span class="badge">{val}</span></td>
+                        <td><div class="reason-box blue">{itm.get('reason')}</div></td>
+                    </tr>
+                """
+            html_content += "</tbody></table>"
+        else:
+            html_content += "<div class='empty-hint'>无阶段 4 剪枝图层</div>"
+
+        html_content += """
+    </div>
+</body>
+</html>
+        """
+        decision_html_path = os.path.join(run_dir, "decision_log.html")
+        with open(decision_html_path, "w", encoding="utf-8") as f:
+            f.write(html_content)
+    except Exception as e:
+        print(f"[Warning] 生成 decision_log.html 异常: {e}")
 
     summary = {
         "run_dir": run_dir,

@@ -145,7 +145,7 @@ def load_config(path: Optional[str] = None, overrides: Optional[dict] = None) ->
     # 剪枝与精修参数
     prune = cfg.setdefault("prune", {})
     prune.setdefault("enabled", True)
-    prune.setdefault("rm_color_threshold", 0.02)
+    prune.setdefault("rm_color_threshold", 3.0)
     prune.setdefault("inclusion_threshold", 0.8)
     prune.setdefault("refine_iters", 100)
     prune.setdefault("raster_threshold", 0.5)
