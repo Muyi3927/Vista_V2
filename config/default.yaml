@@ -19,9 +19,9 @@ run:
 
 paths:
   # 输入图像文件或包含图像的目录路径
-  input: /home/jh/research/projects/VISTA_dev/Vista_V2/dataset/test
+  input: /home/jh/research/projects/VISTA/dataset/pairs_50
   # 矢量化结果（SVG/GIF/JSON）输出根目录
-  output: outputs/test_v3
+  output: outputs/pairs_50
   # SAM 语义分割模型权重路径
   sam_checkpoint: checkpoints/sam_vit_h_4b8939.pth
 
