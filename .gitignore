@@ -35,6 +35,7 @@ out/
 temp_outputs/
 outputs/
 dataset/tmp/
+debug_tools/
 *.svg.bak
 *.png.bak
 

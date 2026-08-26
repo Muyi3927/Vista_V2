@@ -392,19 +392,18 @@ def point_to_line_distance(points, p1, p2):
 
 def fit_contour(contour_simple, contour, max_error=1.0, line_threshold=1.0):
     """
-    使用最少的三阶贝塞尔曲线和直线拟合点集
+    使用三阶贝塞尔曲线拟合多边形点集。
+    每个分段通过最小二乘法拟合 P1 与 P2 控制点，确保初始路径具备充足的可微变形自由度。
     """
     structured_points = [contour_simple[0]]
     i = 0
     while i < len(contour_simple) - 1:
-        # 【修复核心 1】：如果是从第 0 个点开始拟合，不允许直接跳到最后一个点。
-        # 这样强制路径至少切一刀，分为两段以上，防止单段曲线首尾相接。
+        # 首段至少跨过一个中间点，防止单段曲线首尾直接闭合
         start_j = len(contour_simple) - 1
         if i == 0 and start_j > 1:
             start_j -= 1
             
         for j in range(start_j, i, -1):
-        # for j in range(len(contour_simple)-1, i, -1):
             p1 = contour_simple[i]
             p2 = contour_simple[j]
             idx1 = np.where((contour == p1).all(axis=1))[0][0]
@@ -413,26 +412,19 @@ def fit_contour(contour_simple, contour, max_error=1.0, line_threshold=1.0):
                 segment = contour[idx1:idx2+1]
             else:
                 segment = np.concatenate((contour[idx1:], contour[:idx2+1]))
-            distances = point_to_line_distance(segment, p1, p2)
-            max_distance = np.max(distances)
-            if max_distance <= line_threshold:
-                structured_points.append(p2)
-                i = j
-                break
-            else:
-                P0, P1, P2, P3 = fit_bezier_segment(segment)
-                error = compute_error(segment, P0, P1, P2, P3)
-                if error <= max_error:
-                    structured_points.append([P1, P2, P3])
-                    i = j
-                    break
-        if i != j :
-            if max_distance <= error :
-                structured_points.append(p2)
-                i = j
-            else :
+
+            P0, P1, P2, P3 = fit_bezier_segment(segment)
+            error = compute_error(segment, P0, P1, P2, P3)
+            if error <= max_error:
                 structured_points.append([P1, P2, P3])
                 i = j
+                break
+
+        if i != j:
+            # 最小分段拟合保底
+            P0, P1, P2, P3 = fit_bezier_segment(segment)
+            structured_points.append([P1, P2, P3])
+            i = j
         
     return structured_points
 
@@ -480,10 +472,18 @@ def mask_to_path(
     line_threshold=1.0,
     poly_epsilon=None,
     contour_min_dist=2.0,
+    all_bezier=True,
+    adaptive_area_scale=True,
+    adaptive_base_area_ratio=0.05,
+    adaptive_scale_range=(0.5, 1.2),
 ):
     """
     根据二值 mask 提取轮廓并拟合生成 pydiffvg.Path。
 
+    all_bezier: 是否初始化为全三阶贝塞尔曲线（默认 True，保证最大可微优化自由度）。
+    adaptive_area_scale: 是否基于 mask 面积比例自适应缩放误差容差。
+    adaptive_base_area_ratio: 基准面积占比（面积为此比例时缩放为 1.0）。
+    adaptive_scale_range: 面积自适应缩放上下限 [min_scale, max_scale]。
     poly_epsilon: approxPolyDP 容差（像素）。None 时使用 max_error。
     contour_min_dist: 轮廓点最小间距，抑制控制点扎堆。
     """
@@ -506,21 +506,49 @@ def mask_to_path(
     if len(contour) < 3:
         return None
 
+    # 根据 mask 区域面积占比自适应缩放误差容差（小面片分配更精细的像素容差，避免小特征失真）
+    if adaptive_area_scale:
+        mask_bool = (mask > 127)
+        mask_area = float(np.sum(mask_bool))
+        canvas_total_area = float(mask.shape[0] * mask.shape[1])
+        area_ratio = mask_area / max(canvas_total_area, 1.0)
+        
+        base_ratio = float(adaptive_base_area_ratio) if adaptive_base_area_ratio else 0.05
+        min_s, max_s = adaptive_scale_range if adaptive_scale_range else (0.5, 1.2)
+        area_scale = float(np.clip(np.sqrt(area_ratio / max(base_ratio, 1e-5)), min_s, max_s))
+    else:
+        area_scale = 1.0
+
+    # contour_min_dist 也自适应跟随面积缩放，并保底不过度压缩小图元
+    eff_min_dist = float(contour_min_dist) * area_scale
+    eff_min_dist = max(eff_min_dist, 1.0)
+
     if len(contour) > 5:
         filtered_contour = [contour[0]]
-        min_dist = float(contour_min_dist)
         for pt in contour[1:]:
-            if np.linalg.norm(pt - filtered_contour[-1]) > min_dist:
+            if np.linalg.norm(pt - filtered_contour[-1]) > eff_min_dist:
                 filtered_contour.append(pt)
-        if len(filtered_contour) >= 2 and np.linalg.norm(filtered_contour[-1] - filtered_contour[0]) <= min_dist:
+        if len(filtered_contour) >= 2 and np.linalg.norm(filtered_contour[-1] - filtered_contour[0]) <= eff_min_dist:
             filtered_contour.pop()
+        
+        # 点数保护：若抽样后点数少于 4 个但原轮廓有效点充足，按均匀步长保留顶点
+        if len(filtered_contour) < 4 and len(contour) >= 4:
+            step = max(1, len(contour) // 4)
+            filtered_contour = list(contour[::step])
+            if len(filtered_contour) > 4:
+                filtered_contour = filtered_contour[:4]
+        
         contour = np.array(filtered_contour)
+
     if len(contour) < 3:
         return None
 
-    # approxPolyDP epsilon 可配；默认跟 bezier max_error 对齐
-    eps = float(max_error if poly_epsilon is None else poly_epsilon)
-    eps = max(eps, 1e-3)
+    eff_error = float(max_error) * area_scale
+    eff_line = float(line_threshold) * area_scale
+
+    # approxPolyDP epsilon 可配；默认跟随 bezier max_error 对齐
+    eps = float(eff_error if poly_epsilon is None else (poly_epsilon * area_scale))
+    eps = max(eps, 0.2)
     simplified = cv2.approxPolyDP(contour, eps, closed=True).squeeze()
 
     if simplified.ndim == 1:
@@ -539,8 +567,125 @@ def mask_to_path(
     if (contour[idx1 - 1] != simplified[-1]).any():
         simplified = np.vstack((simplified, contour[idx1 - 1]))
 
-    structured_points = fit_contour(simplified, contour, max_error, line_threshold)
+    structured_points = fit_contour(simplified, contour, eff_error, eff_line)
     return points_to_path(structured_points, closed=True)
+
+
+def straighten_shapes_to_lines(
+    shapes: List[pydiffvg.Path],
+    straighten_threshold: float = 1.5,
+    adaptive_scale: bool = True,
+    base_size: float = 100.0,
+    relative_ratio: float = 0.015,
+) -> Tuple[List[pydiffvg.Path], int]:
+    """
+    优化后置直线坍缩重构：
+    在主可微优化收敛后，检测所有三阶贝塞尔曲线段（P0 -> P1 -> P2 -> P3）。
+    若控制点 P1、P2 到端点连线 (P0-P3) 的垂直偏差小于阈值 (straighten_threshold)，
+    说明该边在图像中物理上为直线，将其坍缩重构为严格直线段 (移除 P1、P2，num_control_points 从 2 变为 0)。
+    
+    straighten_threshold: 直线判定垂直距离容差（像素）。
+    adaptive_scale: 是否根据 Shape 尺寸比例自适应缩放容差。
+    base_size: 自适应基准尺寸（像素）。
+    relative_ratio: 相对弦长偏差比例上限（最大垂直偏差/弦长 <= relative_ratio 判定为直线）。
+    返回：(重构后的 shapes 列表, 转换的直线段总数)
+    """
+    if straighten_threshold <= 0:
+        return shapes, 0
+
+    total_straightened = 0
+    device = shapes[0].points.device if shapes and len(shapes) > 0 else torch.device("cpu")
+
+    for path_idx, path in enumerate(shapes):
+        pts = path.points.detach().cpu().numpy()
+        ncps = path.num_control_points.detach().cpu().numpy()
+        is_closed = path.is_closed
+        
+        # 计算该 Shape 的包围盒面积与对角线尺寸
+        min_xy = np.min(pts, axis=0)
+        max_xy = np.max(pts, axis=0)
+        shape_bbox_diag = np.linalg.norm(max_xy - min_xy)
+        
+        if adaptive_scale:
+            b_sz = float(base_size) if base_size else 100.0
+            size_scale = float(np.clip(np.sqrt(shape_bbox_diag / max(b_sz, 1e-3)), 0.5, 1.5))
+            eff_straight_thresh = straighten_threshold * size_scale
+        else:
+            eff_straight_thresh = straighten_threshold
+        
+        new_pts = [pts[0]]
+        new_ncps = []
+        
+        pt_cursor = 1
+        n_segments = len(ncps)
+        
+        for seg_idx, ncp in enumerate(ncps):
+            is_last_seg = (seg_idx == n_segments - 1)
+            
+            if ncp == 2:
+                # 三次贝塞尔曲线：P0, P1, P2, P3
+                p0 = new_pts[-1]
+                p1 = pts[pt_cursor]
+                p2 = pts[pt_cursor + 1]
+                
+                # 如果是 closed path 的最后一段，终点 P3 即为起点 pts[0]
+                if is_closed and is_last_seg and pt_cursor + 2 >= len(pts):
+                    p3 = pts[0]
+                    pt_cursor += 2
+                else:
+                    p3 = pts[pt_cursor + 2]
+                    pt_cursor += 3
+                
+                # 计算 P1, P2 到弦 P0-P3 的最大垂直距离
+                line_vec = p3 - p0
+                line_len = np.linalg.norm(line_vec)
+                if line_len < 1e-6:
+                    max_dev = 0.0
+                else:
+                    def _pt_dist(p, a, b, l_len):
+                        vec = p - a
+                        t = np.clip(np.dot(vec, b - a) / (l_len ** 2), 0, 1)
+                        proj = a + t * (b - a)
+                        return np.linalg.norm(p - proj)
+                    
+                    dev1 = _pt_dist(p1, p0, p3, line_len)
+                    dev2 = _pt_dist(p2, p0, p3, line_len)
+                    max_dev = max(dev1, dev2)
+                
+                # 判定是否为直线：
+                # 1. 垂直偏差小于自适应面积阈值 eff_straight_thresh
+                # 2. 相对偏差 (max_dev / line_len) 小于 relative_ratio
+                is_straight = (max_dev <= eff_straight_thresh) or (line_len > 0 and (max_dev / line_len) < relative_ratio)
+                
+                if is_straight:
+                    # 坍缩为直线段
+                    if not (is_closed and is_last_seg):
+                        new_pts.append(p3)
+                    new_ncps.append(0)
+                    total_straightened += 1
+                else:
+                    # 保持三次贝塞尔曲线
+                    new_pts.extend([p1, p2])
+                    if not (is_closed and is_last_seg):
+                        new_pts.append(p3)
+                    new_ncps.append(2)
+            else:
+                # 原本就是直线段 (ncp == 0)
+                if is_closed and is_last_seg and pt_cursor >= len(pts):
+                    p_end = pts[0]
+                else:
+                    p_end = pts[pt_cursor]
+                    pt_cursor += 1
+                    new_pts.append(p_end)
+                new_ncps.append(0)
+                
+        # 更新 Path 对象
+        path.points = torch.tensor(np.array(new_pts), dtype=torch.float32, device=device).requires_grad_(True)
+        path.num_control_points = torch.tensor(new_ncps, dtype=torch.int32, device=device)
+
+    if total_straightened > 0:
+        print(f"  [几何后置重构] 检测并成功将 {total_straightened} 段近直线贝塞尔曲线坍缩为直线段 (阈值={straighten_threshold}px)")
+    return shapes, total_straightened
 
 
 def mask_color_Kmeans(image, mask, n_clusters=3, threshold=0.9):

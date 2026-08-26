@@ -27,6 +27,7 @@ from utils import (
     is_mask_included,
     mask_edge_color_Kmeans,
     mask_to_path,
+    straighten_shapes_to_lines,
 )
 
 
@@ -55,13 +56,15 @@ def generate_init_svg(
     frames: List[np.ndarray],
     out_svg_path: str,
     max_error: float = 0.003,
-    line_threshold: float = 0.004,
     is_stroke: bool = False,
     poly_epsilon: Optional[float] = None,
-    contour_min_dist: float = 0.004,
+    contour_min_dist: float = 0.002,
+    adaptive_area_scale: bool = True,
+    adaptive_base_area_ratio: float = 0.05,
+    adaptive_scale_range: Tuple[float, float] = (0.6, 1.5),
 ) -> Tuple[List[pydiffvg.Path], List[pydiffvg.ShapeGroup], List[np.ndarray], Dict[int, np.ndarray]]:
     """
-    根据预处理后的 mask 生成初始 SVG；每个 mask 一条 path。
+    根据预处理后的 mask 生成初始 SVG；每个 mask 拟合一条三阶贝塞尔封闭路径。
     """
     print("初始化 SVG...")
     st = time.time()
@@ -69,10 +72,9 @@ def generate_init_svg(
     height, width, _ = target_image.shape
     index_mask_dict = {}
 
-    # 自适应分辨率缩放：输入 < 0.1 则按图像长边比例换算（0.003/0.004）；>= 0.1 则以 512 为基线等比缩放
+    # 自适应分辨率缩放：输入 < 0.1 则按图像长边比例换算；>= 0.1 则以 512 为基线等比缩放
     long_side = max(width, height)
     eff_max_error = (max_error * long_side) if (max_error < 0.1) else (max_error * (long_side / 512.0))
-    eff_line_thresh = (line_threshold * long_side) if (line_threshold < 0.1) else (line_threshold * (long_side / 512.0))
     if poly_epsilon is not None:
         eff_poly_eps = (poly_epsilon * long_side) if (poly_epsilon < 0.1) else (poly_epsilon * (long_side / 512.0))
     else:
@@ -116,7 +118,7 @@ def generate_init_svg(
     for mask_path in pre_mask_path_list:
         base_name = os.path.basename(mask_path).lower()
         if base_name == "bg_auto.png" or base_name.startswith("bg_auto"):
-            # print(f"跳过自动背景 mask: {mask_path}")
+            # 跳过自动背景 mask
             continue
         mask_image = Image.open(mask_path).convert("L")
         if mask_image.size != (width, height):
@@ -125,17 +127,17 @@ def generate_init_svg(
         arr_chk = np.array(mask_image)
         fill_ratio = float((arr_chk > 127).sum()) / float(arr_chk.size + 1e-6)
         if fill_ratio >= 0.98:
-            # print(f"跳过近全图 mask: {mask_path}")
             continue
         path = mask_to_path(
             mask_image,
             max_error=eff_max_error,
-            line_threshold=eff_line_thresh,
             poly_epsilon=eff_poly_eps,
             contour_min_dist=eff_min_dist,
+            adaptive_area_scale=adaptive_area_scale,
+            adaptive_base_area_ratio=adaptive_base_area_ratio,
+            adaptive_scale_range=adaptive_scale_range,
         )
         if path is None:
-            # print(f"跳过空轮廓 mask: {mask_path}")
             continue
 
         path.points = path.points.to(device)
@@ -549,7 +551,9 @@ def prune_shapes_by_rendered_masks(
             })
             continue
 
-        current_color = shape_groups[i].fill_color[:3]
+        current_fill = shape_groups[i].fill_color
+        current_color = current_fill[:3]
+        current_alpha = float(current_fill[3].item() if hasattr(current_fill[3], 'item') else current_fill[3]) if len(current_fill) >= 4 else 1.0
         area_ratio = float(current_area) / float(max(total_area, 1))
 
         # 小碎片允许更宽泛的感知色差容差
@@ -565,7 +569,9 @@ def prune_shapes_by_rendered_masks(
             # 检查与背景层 0 的从属
             if j == 0:
                 bg_color = shape_groups[0].fill_color[:3]
-                d_e_bg = color_similarity_lab(bg_color, current_color, device)
+                # 计算叠加在背景上的人眼真实合成视觉色
+                blended_visual_color = current_alpha * current_color + (1.0 - current_alpha) * bg_color
+                d_e_bg = color_similarity_lab(bg_color, blended_visual_color, device)
                 if d_e_bg < delta_e_limit and current_area <= max_bg_remove_area:
                     to_remove.add(i)
                     svg_rel = _export_single_shape_svg(i)
@@ -578,7 +584,7 @@ def prune_shapes_by_rendered_masks(
                         "parent_svg": p_svg_rel,
                         "total_area": current_area,
                         "delta_e": round(float(d_e_bg), 2),
-                        "reason": f"贴底色背景碎屑且 CIELAB DeltaE={d_e_bg:.2f} < {delta_e_limit:.2f} 同色"
+                        "reason": f"贴底色背景碎屑且真实视觉合成 CIELAB DeltaE={d_e_bg:.2f} < {delta_e_limit:.2f} 同色"
                     })
                 break
 
@@ -597,9 +603,11 @@ def prune_shapes_by_rendered_masks(
 
             if is_inc:
                 existing_color = shape_groups[j].fill_color[:3]
-                d_e = color_similarity_lab(existing_color, current_color, device)
+                # 计算当前图层以其实际 Alpha 叠加在父级图层上的真实视觉合成色
+                blended_visual_color = current_alpha * current_color + (1.0 - current_alpha) * existing_color
+                d_e = color_similarity_lab(existing_color, blended_visual_color, device)
 
-                # CIELAB 色差低于阈值，判定为计算机视觉同色冗余
+                # CIELAB 真实视觉色差低于阈值，判定为计算机视觉同色冗余
                 if d_e < delta_e_limit:
                     to_remove.add(i)
                     svg_rel = _export_single_shape_svg(i)
@@ -612,9 +620,10 @@ def prune_shapes_by_rendered_masks(
                         "parent_svg": p_svg_rel,
                         "total_area": current_area,
                         "delta_e": round(float(d_e), 2),
-                        "reason": f"被父级 #{j} 包含且 CIELAB DeltaE={d_e:.2f} < {delta_e_limit:.2f} 同色剪枝"
+                        "reason": f"被直接父级 #{j} 包含且真实视觉合成 CIELAB DeltaE={d_e:.2f} < {delta_e_limit:.2f} 同色剪枝"
                     })
-                    break
+                # 命中最近直接父级后停止向下穿透，避免跨层过度剪枝
+                break
 
     for idx in sorted(list(to_remove), reverse=True):
         del shapes[idx]
@@ -663,8 +672,12 @@ def svg_optimize(
     raster_threshold: float = 0.5,
     min_alpha_threshold: float = 0.05,
     transparent_svg: bool = False,
+    straighten_threshold: float = 1.5,
+    straighten_adaptive_scale: bool = True,
+    straighten_base_size: float = 100.0,
+    straighten_relative_ratio: float = 0.015,
 ) -> Tuple[str, str, List[pydiffvg.Path], List[pydiffvg.ShapeGroup], float, List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """主优化 -> 几何光栅化剪枝 -> 短迭代精修。"""
+    """主优化 -> 几何直线坍缩重构 -> 几何光栅化剪枝 -> 短迭代精修。"""
     st = time.time()
     print("开始 SVG 优化...")
     result_path = os.path.dirname(svg_out_path)
@@ -699,7 +712,7 @@ def svg_optimize(
         result_path=result_path,
     )
 
-    # 阶段 1：主优化
+    # 阶段 1：主优化（全贝塞尔高自由度可微渲染优化）
     _last_loss, _last_mse, img_render = _run_optimize_loop(
         shapes, shape_groups, num_iters=num_iters, tag="opt", seed_offset=0, **common_kw
     )
@@ -707,6 +720,22 @@ def svg_optimize(
         os.path.join(result_path, "op_final.svg"),
         canvas_width, canvas_height, shapes, shape_groups,
     )
+
+    # 阶段 1.5：优化后置直线坍缩重构（检测已收敛为直线的贝塞尔曲线并转换为严格直线段）
+    if straighten_threshold > 0:
+        shapes, n_straightened = straighten_shapes_to_lines(
+            shapes,
+            straighten_threshold=straighten_threshold,
+            adaptive_scale=straighten_adaptive_scale,
+            base_size=straighten_base_size,
+            relative_ratio=straighten_relative_ratio,
+        )
+        if n_straightened > 0:
+            _save_svg_with_viewbox(
+                os.path.join(result_path, "straightened.svg"),
+                canvas_width, canvas_height, shapes, shape_groups,
+            )
+
     metrics.append(
         _snapshot_metrics(
             "before_prune", shapes, shape_groups, image_target,
@@ -762,6 +791,23 @@ def svg_optimize(
             )
         elif refine_iters > 0 and n_removed == 0:
             print("未移除 path，跳过 refine")
+
+        # 阶段 3.1：精修后二次幽灵图层过滤（清除在 refine 中被优化器推入极度透明态的残留冗余层）
+        if min_alpha_threshold > 0:
+            post_ghost_indices = []
+            for idx in range(1, len(shapes)):
+                fill_col = shape_groups[idx].fill_color
+                if fill_col is not None and len(fill_col) >= 4:
+                    a_val = float(fill_col[3].item() if hasattr(fill_col[3], 'item') else fill_col[3])
+                    if a_val < min_alpha_threshold:
+                        post_ghost_indices.append(idx)
+            if post_ghost_indices:
+                for idx in sorted(post_ghost_indices, reverse=True):
+                    del shapes[idx]
+                    del shape_groups[idx]
+                for new_i, grp in enumerate(shape_groups):
+                    grp.shape_ids = torch.tensor([new_i], device=device)
+                print(f"精修后清除 {len(post_ghost_indices)} 个极低透明度幽灵图层")
 
         metrics.append(
             _snapshot_metrics(
@@ -856,10 +902,12 @@ def run_vectorization(
         frames=frames,
         out_svg_path=init_svg_dir,
         max_error=float(pf_cfg.get("bezier_max_error", 0.003)),
-        line_threshold=float(pf_cfg.get("line_threshold", 0.004)),
         is_stroke=bool(opt_cfg.get("is_stroke", False)),
         poly_epsilon=pf_cfg.get("poly_epsilon"),
-        contour_min_dist=float(pf_cfg.get("contour_min_dist", 0.004)),
+        contour_min_dist=float(pf_cfg.get("contour_min_dist", 0.002)),
+        adaptive_area_scale=bool(pf_cfg.get("adaptive_area_scale", True)),
+        adaptive_base_area_ratio=float(pf_cfg.get("adaptive_base_area_ratio", 0.05)),
+        adaptive_scale_range=tuple(pf_cfg.get("adaptive_scale_range", [0.6, 1.5])),
     )
 
     svg_path, gif_path, shapes, shape_groups, final_loss, metrics, prune_logs = svg_optimize(
@@ -889,6 +937,10 @@ def run_vectorization(
         raster_threshold=float(prune_cfg.get("raster_threshold", 0.5)),
         min_alpha_threshold=float(prune_cfg.get("min_alpha_threshold", 0.05)),
         transparent_svg=bool(cfg.get("transparent_svg", cfg.get("preprocess", {}).get("transparent_svg", False))),
+        straighten_threshold=float(opt_cfg.get("straighten_threshold", 1.5)),
+        straighten_adaptive_scale=bool(opt_cfg.get("straighten_adaptive_scale", True)),
+        straighten_base_size=float(opt_cfg.get("straighten_base_size", 100.0)),
+        straighten_relative_ratio=float(opt_cfg.get("straighten_relative_ratio", 0.015)),
     )
     elapsed = time.time() - st
 

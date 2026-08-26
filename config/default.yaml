@@ -19,9 +19,9 @@ run:
 
 paths:
   # 输入图像文件或包含图像的目录路径
-  input: /home/jh/research/projects/VISTA/dataset/pairs_50
+  input: /home/jh/research/projects/VISTA_dev/Vista_V2/dataset/test
   # 矢量化结果（SVG/GIF/JSON）输出根目录
-  output: outputs/test_pairs_v1
+  output: outputs/test_v3
   # SAM 语义分割模型权重路径
   sam_checkpoint: checkpoints/sam_vit_h_4b8939.pth
 
@@ -100,12 +100,16 @@ preprocess:
 path_fit:
   # 贝塞尔拟合误差容差（< 0.1 则为相对长边比例，默认 0.003 对应 512 分辨率下的 1.5px）
   bezier_max_error: 0.003
-  # 直线判断阈值（< 0.1 则为相对长边比例，默认 0.004 对应 512 分辨率下的 2.0px）
-  line_threshold: 0.004
   # approxPolyDP 简化精度（null 则自适应跟随 bezier_max_error）
   poly_epsilon: null
-  # 轮廓点最小间距（< 0.1 则为相对长边比例，默认 0.004 对应 512 分辨率下的 2.0px）
-  contour_min_dist: 0.004
+  # 轮廓点最小间距（< 0.1 则为相对长边比例，默认 0.002 对应 1024 分辨率下的 2.0px）
+  contour_min_dist: 0.002
+  # 是否开启基于 Mask 面积比例的自适应拟合容差缩放（小面片自动收紧容差保证精细度）
+  adaptive_area_scale: true
+  # 面积自适应缩放基准面积占比（面积等于此比例时缩放比为 1.0）
+  adaptive_base_area_ratio: 0.05
+  # 面积自适应缩放范围 [min_scale, max_scale]
+  adaptive_scale_range: [0.6, 1.5]
 
 # -----------------------------------------------------------------------------
 # DiffVG 可微渲染优化超参数
@@ -131,6 +135,14 @@ optimize:
   collinear_scale: 0.01
   # 共线夹角余弦判定阈值
   collinear_cos_threshold: 0.5
+  # 优化完成后直线坍缩重构阈值（像素误差 <= 1.5px 时将收敛的贝塞尔曲线坍缩为精简严格直线）
+  straighten_threshold: 2.5
+  # 是否开启基于 Shape 面积/尺寸的自适应直线判定阈值缩放
+  straighten_adaptive_scale: true
+  # 直线坍缩自适应基准包围盒对角线长度（像素）
+  straighten_base_size: 100.0
+  # 直线坍缩相对弦长偏差比例上限（最大垂直偏差/弦长 <= 1.5% 判定为直线）
+  straighten_relative_ratio: 0.03
   # 中间 SVG 保存间隔步数
   save_every: 5
   # 动画帧采样间隔步数
@@ -155,7 +167,7 @@ prune:
   # 几何光栅化二值化阈值
   raster_threshold: 0.5
   # 最低有效透明度阈值（低于此值的幽灵图层在剪枝前优先剔除）
-  min_alpha_threshold: 0.05
+  min_alpha_threshold: 0.15
 
 # -----------------------------------------------------------------------------
 # 中间过程输出与可视化结果保存开关（三大核心阶段掩码目录：raw -> origin -> pre）

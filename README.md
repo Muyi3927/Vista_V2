@@ -4,10 +4,11 @@
 [![PyTorch](https://img.shields.io/badge/PyTorch-1.13.1-orange.svg)](https://pytorch.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
+[**中文文档**](README.md) | [**English Documentation**](README_EN.md)
+
 ## 项目简介 (Overview)
 
-
-> **VISTA (Vectorization using Image Segmentation and Tuned Optimization Algorithm)** 是一个通用的端到端图像矢量化算法框架。它深度融合了**自顶向下的语义分割先验 (SAM)** 与**自底向上的超像素聚类 (SLIC)**，配合**队列式孔洞提取与单连通拆解**、**纯度感知直接父级同色吸收**，并在**混合三阶贝塞尔几何拟合**与 **DiffVG 可微渲染优化**的驱动下，解决了传统矢量化方法在复杂场景下形状冗余、拓扑混乱、控制点过密以及难以编辑的问题，能够生成分层清晰、紧凑高保真、拓扑优雅且天然可编辑的标准 SVG 矢量图形。
+> **VISTA (Vectorization using Image Segmentation and Tuned Optimization Algorithm)** 是一个通用的端到端图像矢量化算法框架。它深度融合了**自顶向下的语义分割先验 (SAM)** 与**自底向上的超像素聚类 (SLIC)**，配合**队列式孔洞提取与单连通拆解**、**纯度感知直接父级同色吸收**，并在**纯三阶贝塞尔几何拟合**、**几何直线坍缩重构**与 **DiffVG 可微渲染优化**的驱动下，解决了传统矢量化方法在复杂场景下形状冗余、拓扑混乱、控制点过密以及难以编辑的问题，能够生成分层清晰、紧凑高保真、拓扑优雅且天然可编辑的标准 SVG 矢量图形。
 
 ---
 
@@ -21,7 +22,7 @@ graph LR
     B --> C["阶段 1: 混合分割候选<br/>SAM 语义先验 + CIELAB DBSCAN SLIC<br/>(严格保留原生中空拓扑)"]
     C --> D["阶段 2: 中空形态学与单连通拆解<br/>Open-First 智能自适应断桥平滑<br/>(100% 真实纯度采样)"]
     D --> E["阶段 3: 立体融合引擎<br/>SAM 自去重 + 纯度感知压制 SLIC +<br/>CIELAB Delta E 纯度双锁父子同色吸收<br/>(尾声统一闭合孔洞几何填实)"]
-    E --> F["阶段 4: 矢量拟合与可微渲染优化<br/>贝塞尔直线混合拟合 + DiffVG 可微优化 +<br/>CIELAB 有效可见像素立体剪枝"]
+    E --> F["阶段 4: 矢量拟合与可微渲染优化<br/>纯三阶贝塞尔拟合 + DiffVG 可微优化 +<br/>直线坍缩重构 + CIELAB 有效可见像素立体剪枝"]
     F --> G["成果输出<br/>final.svg (自适应透明/实心底) / animation.gif"]
 ```
 
@@ -42,15 +43,16 @@ graph LR
 
 4. **阶段 3：立体分层融合与 CIELAB 纯度双锁同色吸收 (`segmentation.perform_fusion_and_save`)**
    - **SAM 内部高精度自去重**：抑制 IoU > 0.90 的同源重叠图层；
-   - **纯度感知跨界压制 SLIC**：基于 IoU、包含率、色差与 SAM 纯度守门员机制，杜绝 SLIC 在纯色大块内的坑洼碎片冗余；
+   - **纯度感知跨界压制 SLIC**：基于 IoU、包含率、色差与 SAM 纯度守门员机制，杜绝 SLIC 在纯色大块内的坑洼碎片冗余（对称 $\text{IoU} \ge 0.90$ 时由高质量 SAM 直接取代）；
    - **全局背景层 0 插入**：构建 `000_bg.png` 承接整图底色；
    - **CIELAB 纯度双锁父子同色吸收**：在人眼感知均匀的 CIELAB $\Delta E$ 色彩空间下执行同色吸收，配合“自身纯度锁 (`self_pure_std_thresh`)”与“父级纯度锁 (`parent_pure_std_thresh`)”，既保证同色冗余干净吸收，又杜绝误杀复合容器内的独立细节；
    - **后置孔洞填实 (Late Hole-Filling)**：在融合筛选定型后，对最终存活图层统一调用 `_fill_holes` 闭合填实，输出至 `pre_masks/`，为阶段 4 贝塞尔拟合提供闭合实心几何底盘。
 
-5. **阶段 4：直接矢量化、DiffVG 可微渲染优化与立体剪枝 (`vectorize.generate_init_svg`, `vectorize.svg_optimize`)**
-   - **混合几何拟合**：以最少的三阶贝塞尔曲线和直线段贪婪拟合轮廓；
-   - **主优化**：基于 DiffVG 可微渲染器与 Adam 优化器，联合优化控制点坐标与填充颜色，引入共线平滑（Collinear Handle Loss）与自相交惩罚；
-   - **CIELAB 感知立体剪枝与短精修**：重新光栅化优化后的几何图层，基于 CIELAB $\Delta E$ 感知色差、自底向上图层遮挡有效可见像素分析（Visible Pixel Map），彻底清除贴边同色碎屑，随后执行短轮次精修（Refine）；
+5. **阶段 4：纯三阶贝塞尔几何拟合、DiffVG 可微渲染优化与立体剪枝 (`vectorize.generate_init_svg`, `vectorize.svg_optimize`)**
+   - **纯三阶贝塞尔拟合**：每个分段均使用最小二乘法拟合三阶贝塞尔控制点，赋予初始路径最大变形自由度；
+   - **自适应点距与误差容差**：基于图层面积比例自适应调节容差与采样点距，兼顾大面片稀疏平滑与小细节（如眼睛）保真；
+   - **主优化与几何直线坍缩重构**：基于 DiffVG 可微渲染器优化坐标与色彩；优化收敛后执行几何直线坍缩重构（将近直线段转换为严格直线，去除多余控制点）；
+   - **视觉合成色差立体剪枝与精修**：重新光栅化几何图层，基于真实 Alpha 视觉混合 $\text{CIELAB } \Delta E$ 感知色差与图层遮挡有效可见像素，彻底清除低贡献同色碎片与幽灵图层，随后执行短轮次精修（Refine）；
    - **自适应背景导出**：原图透明则自动导出天然无背景的纯净 SVG，原图有底色则完整保留背景底盘。
 
 ---

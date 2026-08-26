@@ -637,8 +637,9 @@ def perform_fusion_and_save(
             c_diff = float(np.linalg.norm(sl_col - sam_col))
 
             # 【纯度感知立体压制规则】：
-            # 条件 1：高对称 IoU 重合 (>=0.85)，且 SAM 本身是纯色（不是多色容器） -> SAM 取代 SLIC
-            if iou >= iou_sam_slic_thresh and sam_std <= sam_pure_suppress_std:
+            # 条件 1：对称 IoU 极高 (>=0.90) 说明几何形态几乎一致，直接由 SAM 压制 SLIC；
+            #         若为普通重合 (>=iou_sam_slic_thresh)，则要求 SAM 本身是纯色（不是多色容器） -> SAM 取代 SLIC
+            if iou >= 0.90 or (iou >= iou_sam_slic_thresh and sam_std <= sam_pure_suppress_std):
                 suppressed = True
                 stage3_removal_logs.append({
                     "stage": "stage3_slic_suppression",
@@ -650,7 +651,7 @@ def perform_fusion_and_save(
                     "iou": round(float(iou), 4),
                     "iou_threshold": round(float(iou_sam_slic_thresh), 4),
                     "sam_pure_std": round(float(sam_std), 2),
-                    "reason": f"跨界压制：与纯色 SAM 图层 ({k_sam_name}, 色彩方差={sam_std:.2f}) 对称 IoU={iou:.4f} >= {iou_sam_slic_thresh:.2f}"
+                    "reason": f"跨界压制：与 SAM 图层 ({k_sam_name}, 色彩方差={sam_std:.2f}) 对称 IoU={iou:.4f} >= {0.90 if iou >= 0.90 else iou_sam_slic_thresh:.2f}"
                 })
                 break
 
@@ -716,8 +717,9 @@ def perform_fusion_and_save(
         cur = surviving[i]
         cur_orig_file = cur.get("origin_filename", f"#{i:03d}_{cur['source']}_m{cur.get('orig_idx',0):02d}")
         cur_name = f"#{i:03d}_{cur['source']}_m{cur.get('orig_idx',0):02d}_a{cur.get('area',0)}"
-        # 【自身纯度锁】：自身不纯（如包含多个色块/纹理）则独立保留，绝不被吸收
-        if cur.get("homogeneity_std", 0.0) > self_thresh:
+        # 【自身纯度锁】：自身不纯（如包含多个色块/纹理）则独立保留，绝不被吸收；但对极小碎屑 (面积 < 1000px) 适当放宽自身方差至 30.0，避免边缘渐变噪点阻碍同色吸收
+        effective_self_thresh = self_thresh if cur.get("area", 0) >= 1000 else max(self_thresh, 30.0)
+        if cur.get("homogeneity_std", 0.0) > effective_self_thresh:
             continue
         cur_mask = cur["mask_image"] > 0
         cur_color_u8 = np.clip(np.array(cur["fill_color"], dtype=float), 0, 255).astype(np.uint8).reshape(1, 1, 3)
@@ -735,8 +737,9 @@ def perform_fusion_and_save(
 
             inter = np.logical_and(cur_mask, parent_solid_mask).sum()
             inc_ratio = inter / float(cur_area) if cur_area > 0 else 0.0
+            effective_parent_thresh = parent_contain_thresh if cur_area >= 1000 else 0.70
 
-            if inc_ratio >= parent_contain_thresh:
+            if inc_ratio >= effective_parent_thresh:
                 # 【父级纯度锁】：父级如果不是纯色（包含多物体/杂色容器），停止向该父级吸收，防止误杀
                 if parent.get("homogeneity_std", 0.0) > parent_thresh:
                     break
@@ -750,7 +753,7 @@ def perform_fusion_and_save(
                 if delta_e < cielab_diff_thresh:
                     to_remove.add(i)
                     log_msg = f"[Stage 3 同色吸收] {cur_name} 被直接父级 {parent_name} 吸收 (包含率={inc_ratio*100:.1f}%, CIELAB DeltaE={delta_e:.2f} < {cielab_diff_thresh})"
-                    print(f"  {log_msg}")
+                    # print(f"  {log_msg}")
                     stage3_removal_logs.append({
                         "stage": "stage3_color_absorption",
                         "action": "absorbed_by_direct_parent",

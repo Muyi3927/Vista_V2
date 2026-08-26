@@ -117,15 +117,17 @@ def load_config(path: Optional[str] = None, overrides: Optional[dict] = None) ->
     pre.setdefault("inclusion_threshold", 0.90)
     pre.setdefault("self_pure_std_thresh", 15.0)
     pre.setdefault("parent_pure_std_thresh", 3.0)
-    pre.setdefault("color_diff_thresh", 5.0)
+    pre.setdefault("color_diff_thresh", 6.0)
 
-    # 路径拟合默认参数
+    # 路径拟合默认参数（纯贝塞尔拟合）
     pf = cfg.setdefault("path_fit", {})
     pf.setdefault("bezier_max_error", 0.003)
-    pf.setdefault("line_threshold", 0.004)
     if pf.get("poly_epsilon") is None:
         pf["poly_epsilon"] = None
-    pf.setdefault("contour_min_dist", 0.004)
+    pf.setdefault("contour_min_dist", 0.002)
+    pf.setdefault("adaptive_area_scale", True)
+    pf.setdefault("adaptive_base_area_ratio", 0.05)
+    pf.setdefault("adaptive_scale_range", [0.6, 1.5])
 
     # 优化超参数
     opt = cfg.setdefault("optimize", {})
@@ -139,6 +141,10 @@ def load_config(path: Optional[str] = None, overrides: Optional[dict] = None) ->
     opt.setdefault("early_stopping_delta", 5.0e-5)
     opt.setdefault("collinear_scale", 0.01)
     opt.setdefault("collinear_cos_threshold", 0.5)
+    opt.setdefault("straighten_threshold", 1.5)
+    opt.setdefault("straighten_adaptive_scale", True)
+    opt.setdefault("straighten_base_size", 100.0)
+    opt.setdefault("straighten_relative_ratio", 0.03)
     opt.setdefault("save_every", 5)
     opt.setdefault("frame_every", 5)
 
@@ -146,10 +152,10 @@ def load_config(path: Optional[str] = None, overrides: Optional[dict] = None) ->
     prune = cfg.setdefault("prune", {})
     prune.setdefault("enabled", True)
     prune.setdefault("rm_color_threshold", 3.0)
-    prune.setdefault("inclusion_threshold", 0.8)
+    prune.setdefault("inclusion_threshold", 0.75)
     prune.setdefault("refine_iters", 100)
     prune.setdefault("raster_threshold", 0.5)
-    prune.setdefault("min_alpha_threshold", 0.05)
+    prune.setdefault("min_alpha_threshold", 0.15)
 
     # 输出保存开关 (三大阶段: raw -> origin -> pre)
     save_opts = cfg.setdefault("save_options", {})
