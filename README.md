@@ -141,7 +141,7 @@ wget -P checkpoints/ https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4
    ```
 
 3. 运行完成后：
-   - 最终 SVG 与动画自动归档于 `out/run/final_out/`；
+   - 最终 SVG 自动归档于 `out/run/final_out/`；
    - 详细的分阶段中间掩码与调试文件保存在 `out/run/[图像名]_[UUID]/`。
 
 ---

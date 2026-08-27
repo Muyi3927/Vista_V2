@@ -19,9 +19,9 @@ run:
 
 paths:
   # 输入图像文件或包含图像的目录路径
-  input: /home/jh/research/projects/VISTA/dataset/pairs_50
+  input: /home/jh/research/projects/VISTA_dev/Vista_V2/dataset/truth_1.jpg
   # 矢量化结果（SVG/GIF/JSON）输出根目录
-  output: outputs/pairs_50
+  output: outputs/test
   # SAM 语义分割模型权重路径
   sam_checkpoint: checkpoints/sam_vit_h_4b8939.pth
 
@@ -62,8 +62,8 @@ slic:
 # 掩码预处理与分层融合（孔洞提取、连通域拆分、纯度感知直接父级同色吸收）
 # -----------------------------------------------------------------------------
 preprocess:
-  # 图像预处理尺寸（0 表示保持原始分辨率，>0 表示缩放到指定最长边）
-  target_size: 1024
+  # 图像预处理尺寸（0 表示保持原始分辨率，但不超过1024，>0 表示缩放到指定最长边）
+  target_size: 0
   # 是否开启轻量保边去噪滤波 (Bilateral Filter)，抑制 JPEG 噪点块
   denoise: true
   # 双边滤波色彩方差与空间方差
