@@ -262,11 +262,20 @@ def load_and_resize(
     else:
         image = image.convert("RGB")
 
-    # 2. 缩放图像，保持宽高比 (target_size <= 0 表示保持原图大小不缩放)
+    # 2. 缩放图像，保持宽高比
+    # - target_size <= 0: 若图像最小边 > 1024 才按 1024 做等比缩放，否则保持原尺寸
+    # - target_size > 0: 按该值做等比缩放
+    w, h = image.size
     if target_size > 0:
-        w, h = image.size
-        scale = target_size / max(w, h)
-        new_size = (int(w * scale), int(h * scale))
+        scale = target_size / min(w, h)
+        new_size = (max(1, int(round(w * scale))), max(1, int(round(h * scale))))
+    elif min(w, h) > 1024:
+        scale = 1024.0 / min(w, h)
+        new_size = (max(1, int(round(w * scale))), max(1, int(round(h * scale))))
+    else:
+        new_size = (w, h)
+
+    if new_size != (w, h):
         image = image.resize(new_size, Image.Resampling.LANCZOS)
         if alpha_mask_np is not None:
             alpha_mask_pil = Image.fromarray(alpha_mask_np).resize(new_size, Image.Resampling.NEAREST)

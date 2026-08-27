@@ -143,6 +143,7 @@ def stage_vectorize(
     bg_color: Tuple[int, int, int],
     cfg: Optional[Dict[str, Any]] = None,
     final_out_dir: Optional[str] = None,
+    final_svg_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     阶段 2：初始 SVG 路径拟合与 DiffVG 可微渲染优化。
@@ -166,13 +167,9 @@ def stage_vectorize(
             shutil.copy2(svg_path, top_svg)
         if final_out_dir:
             os.makedirs(final_out_dir, exist_ok=True)
-            final_dst = os.path.join(final_out_dir, f"{os.path.basename(run_dir)}.svg")
+            final_name = final_svg_name or "final.svg"
+            final_dst = os.path.join(final_out_dir, final_name)
             shutil.copy2(svg_path, final_dst)
-
-    gif_path = vec_result.get("gif_path")
-    if gif_path and os.path.isfile(gif_path) and final_out_dir:
-        final_gif = os.path.join(final_out_dir, f"{os.path.basename(run_dir)}.gif")
-        shutil.copy2(gif_path, final_gif)
 
     return vec_result
 
@@ -225,6 +222,7 @@ def process_single_image(
         bg_color=seg["bg_color"],
         cfg=vec_cfg,
         final_out_dir=final_out_dir,
+        final_svg_name=f"{job['image_name']}.svg",
     )
 
     # 3. 记录全流程决策日志 (decision_log.json & decision_log.md)：详细记录被移除的掩码、同色吸收原因与阶段4几何剪枝信息
