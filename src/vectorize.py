@@ -9,6 +9,7 @@ VISTA 几何拟合与 DiffVG 可微矢量优化模块 (vectorize.py)
 from __future__ import annotations
 
 import os
+import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -31,17 +32,50 @@ from utils import (
 )
 
 
-def _save_svg_with_viewbox(svg_path: str, canvas_width: int, canvas_height: int, shapes, shape_groups):
-    """保存 SVG 并保证根元素具备标准的 viewBox，避免浏览器裁剪。"""
+def _save_svg_with_viewbox(svg_path: str, canvas_width: int, canvas_height: int, shapes, shape_groups, precision: int = 2):
+    """保存 SVG 并保证根元素具备标准的 viewBox，同时对浮点坐标截断至指定小数位数（默认 2 位）。"""
     pydiffvg.save_svg(svg_path, canvas_width, canvas_height, shapes, shape_groups)
     try:
         if os.path.isfile(svg_path):
             with open(svg_path, "r", encoding="utf-8") as f:
                 content = f.read()
+
+            # 1. 保证 viewBox 属性
             if "<svg" in content and "viewBox" not in content:
                 content = content.replace("<svg", f'<svg viewBox="0 0 {canvas_width} {canvas_height}"', 1)
-                with open(svg_path, "w", encoding="utf-8") as f:
-                    f.write(content)
+
+            # 2. 对浮点坐标进行精度截断（提升可读性并压缩体积）
+            if precision is not None and precision >= 0:
+                def _round_num(match):
+                    num_str = match.group(0)
+                    try:
+                        val = float(num_str)
+                        formatted = f"{val:.{precision}f}".rstrip("0").rstrip(".")
+                        return formatted if formatted not in ("", "-0") else "0"
+                    except Exception:
+                        return num_str
+
+                def _clean_d_attr(match):
+                    d_val = match.group(1)
+                    cleaned_d = re.sub(r"-?\d+\.\d+(?:[eE][-+]?\d+)?", _round_num, d_val)
+                    return f'd="{cleaned_d}"'
+
+                content = re.sub(r'd="([^"]+)"', _clean_d_attr, content)
+
+                def _clean_float_attr(match):
+                    attr_name = match.group(1)
+                    val_str = match.group(2)
+                    try:
+                        v = float(val_str)
+                        v_fmt = f"{v:.{precision}f}".rstrip("0").rstrip(".")
+                        return f'{attr_name}="{v_fmt}"'
+                    except Exception:
+                        return match.group(0)
+
+                content = re.sub(r'\b(opacity|stroke-opacity|stroke-width)="(-?\d+\.\d+)"', _clean_float_attr, content)
+
+            with open(svg_path, "w", encoding="utf-8") as f:
+                f.write(content)
     except Exception:
         pass
 
